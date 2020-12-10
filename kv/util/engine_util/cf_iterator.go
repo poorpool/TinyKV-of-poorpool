@@ -54,7 +54,7 @@ func (i *CFItem) UserMeta() []byte {
 	return i.item.UserMeta()
 }
 
-type BadgerIterator struct {
+type BadgerIterator struct { // 实现了 DBIterator
 	iter   *badger.Iterator
 	prefix string
 }

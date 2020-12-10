@@ -38,22 +38,83 @@ func NewServer(storage storage.Storage) *Server {
 // Raw API.
 func (server *Server) RawGet(_ context.Context, req *kvrpcpb.RawGetRequest) (*kvrpcpb.RawGetResponse, error) {
 	// Your Code Here (1).
-	return nil, nil
+	sr, err := server.storage.Reader(nil)
+	if err != nil {
+		return nil, err
+	}
+	defer sr.Close()
+	value, err := sr.GetCF(req.Cf, req.Key)
+	return &kvrpcpb.RawGetResponse{
+		Value:    value,
+		NotFound: value == nil,
+	}, nil
 }
 
 func (server *Server) RawPut(_ context.Context, req *kvrpcpb.RawPutRequest) (*kvrpcpb.RawPutResponse, error) {
 	// Your Code Here (1).
+	err := server.storage.Write(nil, []storage.Modify{
+		{
+			storage.Put{
+				Key:   req.Key,
+				Value: req.Value,
+				Cf:    req.Cf,
+			},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
 	return nil, nil
 }
 
 func (server *Server) RawDelete(_ context.Context, req *kvrpcpb.RawDeleteRequest) (*kvrpcpb.RawDeleteResponse, error) {
 	// Your Code Here (1).
+	// 先查询再返回
+	sr, err := server.storage.Reader(nil)
+	if err != nil {
+		return nil, err
+	}
+	defer sr.Close()
+	value, err := sr.GetCF(req.Cf, req.Key)
+	if value == nil {
+		return nil, nil
+	}
+	err = server.storage.Write(nil, []storage.Modify{
+		{
+			storage.Delete{
+				Key: req.Key,
+				Cf:  req.Cf,
+			},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
 	return nil, nil
 }
 
 func (server *Server) RawScan(_ context.Context, req *kvrpcpb.RawScanRequest) (*kvrpcpb.RawScanResponse, error) {
 	// Your Code Here (1).
-	return nil, nil
+	sr, err := server.storage.Reader(nil)
+	if err != nil {
+		return nil, err
+	}
+	defer sr.Close()
+	it := sr.IterCF(req.Cf)
+	defer it.Close()
+	it.Seek(req.StartKey)
+	var kvs []*kvrpcpb.KvPair
+	for i := uint32(0); i < req.Limit && it.Valid(); it.Next() {
+		value, _ := it.Item().Value()
+		kvs = append(kvs, &kvrpcpb.KvPair{
+			Key:   it.Item().Key(),
+			Value: value,
+		})
+		i++
+	}
+	return &kvrpcpb.RawScanResponse{
+		Kvs: kvs,
+	}, nil
 }
 
 // Raft commands (tinykv <-> tinykv)
