@@ -17,6 +17,8 @@ package raft
 import (
 	"errors"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"math/rand"
+	"time"
 )
 
 // None is a placeholder node ID used when there is no leader.
@@ -134,6 +136,8 @@ type Raft struct {
 	heartbeatTimeout int
 	// baseline of election interval
 	electionTimeout int
+	// electionTimeout 是无消息到开始选举的时间，electionRandomTimeout 是自己加的选举超时时间，在 [electionTimeout, 2 * electionTimeout) 之间
+	electionRandomTimeout int
 	// number of ticks since it reached last heartbeatTimeout.
 	// only leader keeps heartbeatElapsed.
 	heartbeatElapsed int
@@ -162,11 +166,13 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
+	rand.Seed(time.Now().UnixNano())
 	r := &Raft{
 		id:               c.ID,
 		electionTimeout:  c.ElectionTick,
 		heartbeatTimeout: c.HeartbeatTick,
 		Vote:             0,
+		RaftLog:          newLog(c.Storage),
 		Prs:              map[uint64]*Progress{},
 		votes:            map[uint64]bool{},
 	}
@@ -211,11 +217,9 @@ func (r *Raft) tick() {
 			}
 		}
 	}
-	if r.electionTimeout == r.electionElapsed {
+	if r.electionRandomTimeout == r.electionElapsed && r.State != StateLeader {
 		r.electionElapsed = 0
-		if r.State != StateLeader {
-			r.handleHup(pb.Message{})
-		}
+		r.handleHup(pb.Message{})
 	}
 }
 
@@ -227,6 +231,8 @@ func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	r.Lead = lead
 	r.Vote = 0
 	r.votes = map[uint64]bool{}
+	r.electionRandomTimeout = rand.Intn(r.electionTimeout) + r.electionTimeout
+	r.electionElapsed = 0
 }
 
 // becomeCandidate transform this peer's state to candidate
@@ -236,6 +242,8 @@ func (r *Raft) becomeCandidate() {
 	r.Term++ // 自增任期号，开始选举
 	r.Vote = 0
 	r.votes = map[uint64]bool{}
+	r.electionRandomTimeout = rand.Intn(r.electionTimeout) + r.electionTimeout
+	r.electionElapsed = 0
 }
 
 // becomeLeader transform this peer's state to leader
@@ -260,8 +268,7 @@ func (r *Raft) Step(m pb.Message) error {
 			r.becomeFollower(fromTerm, m.GetFrom())
 		}
 		r.Term = fromTerm
-	}
-	if fromTerm < r.Term {
+	} else if fromTerm < r.Term {
 		return nil // 过期了
 	}
 	switch m.GetMsgType() { // todo: 在这儿使用反射
@@ -283,7 +290,9 @@ func (r *Raft) Step(m pb.Message) error {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
-
+	if m.Term >= r.Term && r.State == StateCandidate {
+		r.becomeFollower(m.Term, m.GetFrom())
+	}
 	switch r.State {
 	case StateFollower:
 	case StateCandidate:
@@ -324,33 +333,25 @@ func (r *Raft) handleHup(m pb.Message) {
 
 // handleRequestVote handle RequestVote RPC request
 func (r *Raft) handleRequestVote(m pb.Message) {
-	if r.Term > m.GetTerm() {
-		r.msgs = append(r.msgs, pb.Message{
-			MsgType: pb.MessageType_MsgRequestVoteResponse,
-			To:      m.GetFrom(),
-			From:    r.id,
-			Term:    r.Term,
-			Reject:  true,
-		})
+	willVote := false
+	if r.Term <= m.GetTerm() && (r.Vote == 0 || r.Vote == m.GetFrom()) {
+		mindex, mterm := m.GetIndex(), m.GetLogTerm()
+		rindex := r.RaftLog.LastIndex()
+		rterm, _ := r.RaftLog.Term(rindex)
+		if mindex == 0 || mterm == 0 || rindex == 0 || rterm == 0 {
+			willVote = true
+		}
+		if mindex > 0 && mterm > 0 && (mterm > rterm || (mterm == rterm && mindex >= rindex)) {
+			willVote = true
+		}
 	}
-	if r.Vote != 0 && r.Vote != m.GetFrom() {
-		r.msgs = append(r.msgs, pb.Message{
-			MsgType: pb.MessageType_MsgRequestVoteResponse,
-			To:      m.GetFrom(),
-			From:    r.id,
-			Term:    r.Term,
-			Reject:  true,
-		})
-	} else {
-		r.msgs = append(r.msgs, pb.Message{
-			MsgType: pb.MessageType_MsgRequestVoteResponse,
-			To:      m.GetFrom(),
-			From:    r.id,
-			Term:    r.Term,
-			Reject:  false,
-		})
-		r.Vote = m.GetFrom()
-	}
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgRequestVoteResponse,
+		To:      m.GetFrom(),
+		From:    r.id,
+		Term:    r.Term,
+		Reject:  !willVote,
+	})
 }
 
 // handleRequestVoteResponse handle RequestVoteResponse RPC request
