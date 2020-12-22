@@ -206,17 +206,11 @@ func (r *Raft) tick() {
 	}
 	r.electionElapsed++
 	if r.State == StateLeader && r.heartbeatElapsed == r.heartbeatTimeout {
-		r.heartbeatElapsed = 0
-		for k, _ := range r.Prs {
-			if k != r.id {
-				r.msgs = append(r.msgs, pb.Message{
-					To:      k,
-					From:    r.id,
-					Term:    r.Term,
-					MsgType: pb.MessageType_MsgHeartbeat,
-				})
-			}
-		}
+		r.handleBeat(pb.Message{
+			MsgType: pb.MessageType_MsgBeat,
+			From:    r.id,
+			To:      r.id,
+		})
 	}
 	if r.electionRandomTimeout == r.electionElapsed && r.State != StateLeader {
 		r.electionElapsed = 0
@@ -224,7 +218,6 @@ func (r *Raft) tick() {
 			MsgType: pb.MessageType_MsgHup,
 			From:    r.id,
 			To:      r.id,
-			Term:    r.Term,
 		})
 	}
 }
@@ -288,6 +281,8 @@ func (r *Raft) Step(m pb.Message) error {
 		r.handleHup(m)
 	case pb.MessageType_MsgRequestVoteResponse:
 		r.handleRequestVoteResponse(m)
+	case pb.MessageType_MsgBeat:
+		r.handleBeat(m)
 	}
 
 	return nil
@@ -313,9 +308,13 @@ func (r *Raft) handlePropose(m pb.Message) {
 	}
 }
 
-// handleHup handle Propose RPC request
+// handleHup handle Hup request
 func (r *Raft) handleHup(m pb.Message) {
 	if m.GetFrom() != r.id {
+		return
+	}
+
+	if r.State == StateLeader {
 		return
 	}
 	r.electionElapsed = 0
@@ -375,6 +374,23 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 	}
 	if cnt > len(r.Prs)/2 && r.State != StateLeader {
 		r.becomeLeader()
+	}
+}
+
+// handleBeat handle Beat request
+func (r *Raft) handleBeat(m pb.Message) {
+	if r.State == StateLeader && m.GetFrom() == r.id {
+		r.heartbeatElapsed = 0
+		for k, _ := range r.Prs {
+			if k != r.id {
+				r.msgs = append(r.msgs, pb.Message{
+					To:      k,
+					From:    r.id,
+					Term:    r.Term,
+					MsgType: pb.MessageType_MsgHeartbeat,
+				})
+			}
+		}
 	}
 }
 
