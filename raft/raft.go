@@ -176,6 +176,7 @@ func newRaft(c *Config) *Raft {
 		Prs:              map[uint64]*Progress{},
 		votes:            map[uint64]bool{},
 	}
+	r.electionRandomTimeout = rand.Intn(r.electionTimeout) + r.electionTimeout
 	for _, v := range c.peers {
 		r.Prs[v] = &Progress{
 			Match: 0,
@@ -219,7 +220,12 @@ func (r *Raft) tick() {
 	}
 	if r.electionRandomTimeout == r.electionElapsed && r.State != StateLeader {
 		r.electionElapsed = 0
-		r.handleHup(pb.Message{})
+		r.handleHup(pb.Message{
+			MsgType: pb.MessageType_MsgHup,
+			From:    r.id,
+			To:      r.id,
+			Term:    r.Term,
+		})
 	}
 }
 
@@ -258,7 +264,7 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-	// log.Println(m.GetMsgType())
+	//log.Println(m.GetMsgType(), m.GetFrom(), m.GetTo())
 	if m.From != r.id {
 		r.electionElapsed = 0
 	}
@@ -268,7 +274,7 @@ func (r *Raft) Step(m pb.Message) error {
 			r.becomeFollower(fromTerm, m.GetFrom())
 		}
 		r.Term = fromTerm
-	} else if fromTerm < r.Term {
+	} else if fromTerm > 0 && fromTerm < r.Term {
 		return nil // 过期了
 	}
 	switch m.GetMsgType() { // todo: 在这儿使用反射
@@ -309,8 +315,12 @@ func (r *Raft) handlePropose(m pb.Message) {
 
 // handleHup handle Propose RPC request
 func (r *Raft) handleHup(m pb.Message) {
+	if m.GetFrom() != r.id {
+		return
+	}
 	r.electionElapsed = 0
 	r.becomeCandidate()
+
 	if r.Vote == 0 {
 		r.Vote = r.id
 		r.votes[r.id] = true
@@ -338,10 +348,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		mindex, mterm := m.GetIndex(), m.GetLogTerm()
 		rindex := r.RaftLog.LastIndex()
 		rterm, _ := r.RaftLog.Term(rindex)
-		if mindex == 0 || mterm == 0 || rindex == 0 || rterm == 0 {
-			willVote = true
-		}
-		if mindex > 0 && mterm > 0 && (mterm > rterm || (mterm == rterm && mindex >= rindex)) {
+		if mterm > rterm || (mterm == rterm && mindex >= rindex) {
 			willVote = true
 		}
 	}
@@ -352,6 +359,9 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		Term:    r.Term,
 		Reject:  !willVote,
 	})
+	if willVote {
+		r.Vote = m.GetFrom()
+	}
 }
 
 // handleRequestVoteResponse handle RequestVoteResponse RPC request
