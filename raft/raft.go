@@ -16,8 +16,8 @@ package raft
 
 import (
 	"errors"
-
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"log"
 )
 
 // None is a placeholder node ID used when there is no leader.
@@ -163,7 +163,21 @@ func newRaft(c *Config) *Raft {
 		panic(err.Error())
 	}
 	// Your Code Here (2A).
-	return nil
+	r := &Raft{
+		id:               c.ID,
+		electionTimeout:  c.ElectionTick,
+		heartbeatTimeout: c.HeartbeatTick,
+		Vote:             0,
+		Prs:              map[uint64]*Progress{},
+		votes:            map[uint64]bool{},
+	}
+	for _, v := range c.peers {
+		r.Prs[v] = &Progress{
+			Match: 0,
+			Next:  1,
+		}
+	}
+	return r
 }
 
 // sendAppend sends an append RPC with new entries (if any) and the
@@ -181,39 +195,116 @@ func (r *Raft) sendHeartbeat(to uint64) {
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
+	r.heartbeatElapsed++
+	r.electionElapsed++
+	if r.State == StateLeader && r.heartbeatElapsed == r.heartbeatTimeout {
+		r.heartbeatElapsed = 0
+		for k, _ := range r.Prs {
+			if k != r.id {
+				r.msgs = append(r.msgs, pb.Message{
+					To:      k,
+					From:    r.id,
+					Term:    r.Term,
+					MsgType: pb.MessageType_MsgHeartbeat,
+				})
+			}
+		}
+	}
+	if r.electionTimeout == r.electionElapsed {
+		r.electionElapsed = 0
+		r.becomeCandidate()
+		if r.Vote == 0 {
+			r.Vote = r.id
+			r.votes[r.id] = true
+		}
+		for k, _ := range r.Prs {
+			if k != r.id {
+				r.msgs = append(r.msgs, pb.Message{
+					MsgType: pb.MessageType_MsgRequestVote,
+					To:      k,
+					From:    r.id,
+					Term:    r.Term,
+				})
+			}
+		}
+
+	}
 }
 
 // becomeFollower transform this peer's state to Follower
 func (r *Raft) becomeFollower(term uint64, lead uint64) {
 	// Your Code Here (2A).
+	r.State = StateFollower
+	r.Term = term
+	r.Lead = lead
+	r.Vote = 0
+	r.votes = map[uint64]bool{}
 }
 
 // becomeCandidate transform this peer's state to candidate
 func (r *Raft) becomeCandidate() {
 	// Your Code Here (2A).
+	r.State = StateCandidate
+	r.Term++ // 自增任期号，开始选举
+	r.Vote = 0
+	r.votes = map[uint64]bool{}
 }
 
 // becomeLeader transform this peer's state to leader
 func (r *Raft) becomeLeader() {
 	// Your Code Here (2A).
 	// NOTE: Leader should propose a noop entry on its term
+	r.State = StateLeader
+	r.heartbeatElapsed = 0
 }
 
 // Step the entrance of handle message, see `MessageType`
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-	switch r.State {
-	case StateFollower:
-	case StateCandidate:
-	case StateLeader:
+	log.Println(m.GetMsgType())
+	var fromTerm = m.GetTerm()
+	if fromTerm > r.Term {
+		if r.State != StateFollower {
+			r.becomeFollower(fromTerm, m.GetFrom())
+		}
+		r.Term = fromTerm
 	}
+	if fromTerm < r.Term {
+		return nil // 过期了
+	}
+	switch m.GetMsgType() { // todo: 在这儿使用反射
+	case pb.MessageType_MsgRequestVote:
+		r.handleRequestVote(m)
+	case pb.MessageType_MsgAppend:
+		r.handleAppendEntries(m)
+	case pb.MessageType_MsgPropose:
+		r.handlePropose(m)
+	}
+
 	return nil
 }
 
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+
+	switch r.State {
+	case StateFollower:
+	case StateCandidate:
+	case StateLeader:
+	}
+}
+
+// handlePropose handle Propose RPC request
+func (r *Raft) handlePropose(m pb.Message) {
+	if r.State != StateLeader {
+		return
+	}
+}
+
+// handleRequestVote handle RequestVote RPC request
+func (r *Raft) handleRequestVote(m pb.Message) {
 }
 
 // handleHeartbeat handle Heartbeat RPC request

@@ -19,5 +19,6 @@ func (sr *StandaloneStorageReader) IterCF(cf string) engine_util.DBIterator {
 }
 
 func (sr *StandaloneStorageReader) Close() {
+	_ = sr.txn.Commit()
 	sr.txn.Discard()
 }
