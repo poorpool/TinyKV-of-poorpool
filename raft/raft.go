@@ -17,7 +17,6 @@ package raft
 import (
 	"errors"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
-	"log"
 )
 
 // None is a placeholder node ID used when there is no leader.
@@ -195,7 +194,9 @@ func (r *Raft) sendHeartbeat(to uint64) {
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
-	r.heartbeatElapsed++
+	if r.State == StateLeader {
+		r.heartbeatElapsed++
+	}
 	r.electionElapsed++
 	if r.State == StateLeader && r.heartbeatElapsed == r.heartbeatTimeout {
 		r.heartbeatElapsed = 0
@@ -212,22 +213,9 @@ func (r *Raft) tick() {
 	}
 	if r.electionTimeout == r.electionElapsed {
 		r.electionElapsed = 0
-		r.becomeCandidate()
-		if r.Vote == 0 {
-			r.Vote = r.id
-			r.votes[r.id] = true
+		if r.State != StateLeader {
+			r.handleHup(pb.Message{})
 		}
-		for k, _ := range r.Prs {
-			if k != r.id {
-				r.msgs = append(r.msgs, pb.Message{
-					MsgType: pb.MessageType_MsgRequestVote,
-					To:      k,
-					From:    r.id,
-					Term:    r.Term,
-				})
-			}
-		}
-
 	}
 }
 
@@ -262,7 +250,10 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-	log.Println(m.GetMsgType())
+	// log.Println(m.GetMsgType())
+	if m.From != r.id {
+		r.electionElapsed = 0
+	}
 	var fromTerm = m.GetTerm()
 	if fromTerm > r.Term {
 		if r.State != StateFollower {
@@ -280,6 +271,10 @@ func (r *Raft) Step(m pb.Message) error {
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgPropose:
 		r.handlePropose(m)
+	case pb.MessageType_MsgHup:
+		r.handleHup(m)
+	case pb.MessageType_MsgRequestVoteResponse:
+		r.handleRequestVoteResponse(m)
 	}
 
 	return nil
@@ -303,8 +298,73 @@ func (r *Raft) handlePropose(m pb.Message) {
 	}
 }
 
+// handleHup handle Propose RPC request
+func (r *Raft) handleHup(m pb.Message) {
+	r.electionElapsed = 0
+	r.becomeCandidate()
+	if r.Vote == 0 {
+		r.Vote = r.id
+		r.votes[r.id] = true
+	}
+	if 1 > len(r.Prs)/2 { // 只有一个人
+		r.becomeLeader()
+		return
+	}
+	for k, _ := range r.Prs {
+		if k != r.id {
+			r.msgs = append(r.msgs, pb.Message{
+				MsgType: pb.MessageType_MsgRequestVote,
+				To:      k,
+				From:    r.id,
+				Term:    r.Term,
+			})
+		}
+	}
+}
+
 // handleRequestVote handle RequestVote RPC request
 func (r *Raft) handleRequestVote(m pb.Message) {
+	if r.Term > m.GetTerm() {
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType: pb.MessageType_MsgRequestVoteResponse,
+			To:      m.GetFrom(),
+			From:    r.id,
+			Term:    r.Term,
+			Reject:  true,
+		})
+	}
+	if r.Vote != 0 && r.Vote != m.GetFrom() {
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType: pb.MessageType_MsgRequestVoteResponse,
+			To:      m.GetFrom(),
+			From:    r.id,
+			Term:    r.Term,
+			Reject:  true,
+		})
+	} else {
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType: pb.MessageType_MsgRequestVoteResponse,
+			To:      m.GetFrom(),
+			From:    r.id,
+			Term:    r.Term,
+			Reject:  false,
+		})
+		r.Vote = m.GetFrom()
+	}
+}
+
+// handleRequestVoteResponse handle RequestVoteResponse RPC request
+func (r *Raft) handleRequestVoteResponse(m pb.Message) {
+	r.votes[m.GetFrom()] = !m.GetReject()
+	cnt := 0
+	for _, v := range r.votes {
+		if v {
+			cnt++
+		}
+	}
+	if cnt > len(r.Prs)/2 && r.State != StateLeader {
+		r.becomeLeader()
+	}
 }
 
 // handleHeartbeat handle Heartbeat RPC request
