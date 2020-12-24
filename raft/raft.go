@@ -196,6 +196,12 @@ func (r *Raft) sendAppend(to uint64) bool {
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
+	r.msgs = append(r.msgs, pb.Message{
+		To:      to,
+		From:    r.id,
+		Term:    r.Term,
+		MsgType: pb.MessageType_MsgHeartbeat,
+	})
 }
 
 // tick advances the internal logical clock by a single tick.
@@ -206,7 +212,7 @@ func (r *Raft) tick() {
 	}
 	r.electionElapsed++
 	if r.State == StateLeader && r.heartbeatElapsed == r.heartbeatTimeout {
-		r.handleBeat(pb.Message{
+		r.Step(pb.Message{
 			MsgType: pb.MessageType_MsgBeat,
 			From:    r.id,
 			To:      r.id,
@@ -214,7 +220,7 @@ func (r *Raft) tick() {
 	}
 	if r.electionRandomTimeout == r.electionElapsed && r.State != StateLeader {
 		r.electionElapsed = 0
-		r.handleHup(pb.Message{
+		r.Step(pb.Message{
 			MsgType: pb.MessageType_MsgHup,
 			From:    r.id,
 			To:      r.id,
@@ -258,17 +264,17 @@ func (r *Raft) becomeLeader() {
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
 	//log.Println(m.GetMsgType(), m.GetFrom(), m.GetTo())
-	if m.From != r.id {
+	if m.From != r.id { // 不处理自己给自己发消息
 		r.electionElapsed = 0
-	}
-	var fromTerm = m.GetTerm()
-	if fromTerm > r.Term {
-		if r.State != StateFollower {
-			r.becomeFollower(fromTerm, m.GetFrom())
+		var fromTerm = m.GetTerm()
+		if fromTerm > r.Term {
+			if r.State != StateFollower {
+				r.becomeFollower(fromTerm, m.GetFrom())
+			}
+			r.Term = fromTerm
+		} else if fromTerm > 0 && fromTerm < r.Term {
+			return nil // 过期了
 		}
-		r.Term = fromTerm
-	} else if fromTerm > 0 && fromTerm < r.Term {
-		return nil // 过期了
 	}
 	switch m.GetMsgType() { // todo: 在这儿使用反射
 	case pb.MessageType_MsgRequestVote:
@@ -383,19 +389,14 @@ func (r *Raft) handleBeat(m pb.Message) {
 		r.heartbeatElapsed = 0
 		for k, _ := range r.Prs {
 			if k != r.id {
-				r.msgs = append(r.msgs, pb.Message{
-					To:      k,
-					From:    r.id,
-					Term:    r.Term,
-					MsgType: pb.MessageType_MsgHeartbeat,
-				})
+				r.sendHeartbeat(k)
 			}
 		}
 	}
 }
 
 // handleHeartbeat handle Heartbeat RPC request
-func (r *Raft) handleHeartbeat(m pb.Message) {
+func (r *Raft) handleHeartbeat(m pb.Message) { // fixme: 处理更高任期的心跳似乎在Step里处理了
 	// Your Code Here (2A).
 }
 
