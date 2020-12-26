@@ -202,7 +202,7 @@ func (r *Raft) sendAppend(to uint64) bool {
 		Entries: entries,
 		Commit:  r.RaftLog.committed,
 	})
-	log.Printf("%d send to %d %d entries\n", r.id, to, len(entries))
+	//log.Printf("%d send to %d %d entries\n", r.id, to, len(entries))
 	return true
 }
 
@@ -276,8 +276,9 @@ func (r *Raft) becomeLeader() {
 			Next:  r.RaftLog.LastIndex() + 1, // raft 论文
 		}
 	}
+	//r.RaftLog.entries = append(r.RaftLog.entries, pb.Entry{})
 	r.RaftLog.AppendEntries([]*pb.Entry{
-		{Data: nil, Term: r.Term, Index: r.RaftLog.LastIndex() + 1},
+		{},
 	}, r.Term)
 }
 
@@ -326,6 +327,37 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	}
 	switch r.State {
 	case StateFollower:
+		reject := false
+		prevLogIndex, prevLogTerm := m.GetIndex(), m.GetLogTerm()
+		findTerm, _ := r.RaftLog.Term(prevLogIndex)
+		if findTerm != prevLogTerm {
+			reject = true
+		}
+		if !reject {
+			var willAppendEntries []*pb.Entry
+			for i, v := range m.GetEntries() {
+				findTerm, _ := r.RaftLog.Term(v.GetIndex())
+				if findTerm != 0 && findTerm != v.GetTerm() {
+					r.RaftLog.DeleteFromIndex(v.GetIndex())
+					willAppendEntries = m.GetEntries()[i:]
+					break
+				}
+				if findTerm == 0 {
+					willAppendEntries = m.GetEntries()[i:]
+					break
+				}
+			}
+			r.RaftLog.AppendEntriesWithTheirOwnTerm(willAppendEntries)
+			r.RaftLog.committed = m.GetCommit()
+		}
+		//log.Println("append reject? ", reject)
+		r.msgs = append(r.msgs, pb.Message{
+			MsgType: pb.MessageType_MsgAppendResponse,
+			To:      m.GetFrom(),
+			From:    r.id,
+			Term:    r.Term,
+			Reject:  reject,
+		})
 	case StateCandidate:
 	case StateLeader:
 	}
@@ -342,6 +374,9 @@ func (r *Raft) handlePropose(m pb.Message) {
 		if k != r.id {
 			r.sendAppend(k)
 		}
+	}
+	if len(r.Prs) == 1 {
+		r.RaftLog.committed = r.RaftLog.lastIndex
 	}
 }
 
@@ -367,11 +402,15 @@ func (r *Raft) handleHup(m pb.Message) {
 	}
 	for k, _ := range r.Prs {
 		if k != r.id {
+			index := r.RaftLog.LastIndex()
+			logTerm, _ := r.RaftLog.Term(index)
 			r.msgs = append(r.msgs, pb.Message{
 				MsgType: pb.MessageType_MsgRequestVote,
 				To:      k,
 				From:    r.id,
 				Term:    r.Term,
+				Index:   index,
+				LogTerm: logTerm,
 			})
 		}
 	}
@@ -384,7 +423,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		mindex, mterm := m.GetIndex(), m.GetLogTerm()
 		rindex := r.RaftLog.LastIndex()
 		rterm, _ := r.RaftLog.Term(rindex)
-		//log.Println("mterm, ", mterm, "rterm, ", rterm, "mindex, ", mindex, "rindex, ", rindex)
+		log.Println("mterm, ", mterm, "rterm, ", rterm, "mindex, ", mindex, "rindex, ", rindex)
 		if mterm > rterm || (mterm == rterm && mindex >= rindex) {
 			willVote = true
 		}
@@ -396,7 +435,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		Term:    r.Term,
 		Reject:  !willVote,
 	})
-	//log.Println(m.GetFrom(), " request ", r.id, " to vote, ", willVote, ", after that term is ", r.Term)
+	log.Println(m.GetFrom(), " request ", r.id, " to vote, ", willVote, ", after that term is ", r.Term)
 	if willVote {
 		r.Vote = m.GetFrom()
 	}
@@ -430,8 +469,25 @@ func (r *Raft) handleBeat(m pb.Message) {
 
 func (r *Raft) handleAppendResponse(m pb.Message) {
 	// log.Printf("Received from %d, index is %d\n", m.GetFrom(), m.GetIndex())
+	if m.GetReject() {
+		r.Prs[m.GetFrom()].Next--
+		r.sendAppend(m.GetFrom())
+		return
+	}
 	r.Prs[m.GetFrom()].Next = m.GetIndex() + 1
-	r.RaftLog.committed = m.GetIndex()
+	r.Prs[m.GetFrom()].Match = m.GetIndex()
+	for i := r.RaftLog.committed + 1; i <= r.RaftLog.lastIndex; i++ {
+		cnt := 0
+		for k, v := range r.Prs {
+			if k != r.id && v.Match >= i {
+				cnt++
+			}
+		}
+		logTerm, _ := r.RaftLog.Term(i)
+		if logTerm == r.Term && cnt+1 > len(r.Prs)/2 {
+			r.RaftLog.committed = i
+		}
+	}
 }
 
 // handleHeartbeat handle Heartbeat RPC request

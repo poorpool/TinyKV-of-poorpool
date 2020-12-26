@@ -75,6 +75,7 @@ func newLog(storage Storage) *RaftLog {
 	return &RaftLog{
 		entries:   entries,
 		lastIndex: ls,
+		stabled:   ls,
 	}
 }
 
@@ -88,9 +89,9 @@ func (l *RaftLog) maybeCompact() {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	var entries []pb.Entry
+	entries := []pb.Entry{} // 应当这么写
 	for _, v := range l.entries {
-		if v.GetIndex() > l.committed {
+		if v.GetIndex() > l.stabled {
 			entries = append(entries, v)
 		}
 	}
@@ -117,7 +118,13 @@ func (l *RaftLog) unstableEntryPointersFromIndexWithPrevIndexAndTerm(i uint64) (
 // nextEnts returns all the committed but not applied entries
 func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 	// Your Code Here (2A).
-	return nil
+	var entries []pb.Entry
+	for _, v := range l.entries {
+		if v.GetIndex() <= l.committed && v.GetIndex() > l.applied {
+			entries = append(entries, v)
+		}
+	}
+	return entries
 }
 
 // LastIndex return the last index of the log entries
@@ -137,6 +144,17 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 	return 0, nil
 }
 
+func (l *RaftLog) AppendEntriesWithTheirOwnTerm(entries []*pb.Entry) {
+	for _, v := range entries {
+		l.lastIndex++
+		l.entries = append(l.entries, pb.Entry{
+			Term:  v.GetTerm(),
+			Index: l.lastIndex,
+			Data:  v.GetData(),
+		})
+	}
+}
+
 func (l *RaftLog) AppendEntries(entries []*pb.Entry, term uint64) {
 	for _, v := range entries {
 		l.lastIndex++
@@ -146,4 +164,21 @@ func (l *RaftLog) AppendEntries(entries []*pb.Entry, term uint64) {
 			Data:  v.GetData(),
 		})
 	}
+}
+
+func (l *RaftLog) DeleteFromIndex(index uint64) {
+	for i, v := range l.entries {
+		if v.GetIndex() == index {
+			l.entries = l.entries[:i]
+			break
+		}
+	}
+	if len(l.entries) == 0 {
+		l.lastIndex = 0
+	} else {
+		l.lastIndex = min(l.lastIndex, l.entries[len(l.entries)-1].Index)
+	}
+	l.committed = min(l.committed, l.lastIndex)
+	l.applied = min(l.applied, l.lastIndex)
+	l.stabled = min(l.stabled, l.lastIndex)
 }
