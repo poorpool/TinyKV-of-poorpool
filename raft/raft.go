@@ -17,6 +17,7 @@ package raft
 import (
 	"errors"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"log"
 	"math/rand"
 	"time"
 )
@@ -190,7 +191,19 @@ func newRaft(c *Config) *Raft {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
-	return false
+	entries, index, logTerm := r.RaftLog.unstableEntryPointersFromIndexWithPrevIndexAndTerm(r.Prs[to].Next)
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgAppend,
+		To:      to,
+		From:    r.id,
+		Term:    r.Term,
+		LogTerm: logTerm, // 要发送的entries前一个term
+		Index:   index,   // 要发送的entries前一个index
+		Entries: entries,
+		Commit:  r.RaftLog.committed,
+	})
+	log.Printf("%d send to %d %d entries\n", r.id, to, len(entries))
+	return true
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
@@ -257,6 +270,15 @@ func (r *Raft) becomeLeader() {
 	// NOTE: Leader should propose a noop entry on its term
 	r.State = StateLeader
 	r.heartbeatElapsed = 0
+	for k, _ := range r.Prs {
+		r.Prs[k] = &Progress{
+			Match: 0,
+			Next:  r.RaftLog.LastIndex() + 1, // raft 论文
+		}
+	}
+	r.RaftLog.AppendEntries([]*pb.Entry{
+		{Data: nil, Term: r.Term, Index: r.RaftLog.LastIndex() + 1},
+	}, r.Term)
 }
 
 // Step the entrance of handle message, see `MessageType`
@@ -278,7 +300,7 @@ func (r *Raft) Step(m pb.Message) error {
 	}
 	switch m.GetMsgType() { // todo: 在这儿使用反射
 	case pb.MessageType_MsgRequestVote:
-		r.handleRequestVote(m)
+		r.handleRequestVote(m) // fixme: 这儿暂时过不去leadercycle,因为没进行noop entry的复制,做完2ab回来修
 	case pb.MessageType_MsgAppend:
 		r.handleAppendEntries(m)
 	case pb.MessageType_MsgPropose:
@@ -289,6 +311,8 @@ func (r *Raft) Step(m pb.Message) error {
 		r.handleRequestVoteResponse(m)
 	case pb.MessageType_MsgBeat:
 		r.handleBeat(m)
+	case pb.MessageType_MsgAppendResponse:
+		r.handleAppendResponse(m)
 	}
 
 	return nil
@@ -311,6 +335,13 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 func (r *Raft) handlePropose(m pb.Message) {
 	if r.State != StateLeader {
 		return
+	}
+	entries := m.GetEntries()
+	r.RaftLog.AppendEntries(entries, r.Term)
+	for k, _ := range r.Prs {
+		if k != r.id {
+			r.sendAppend(k)
+		}
 	}
 }
 
@@ -353,6 +384,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		mindex, mterm := m.GetIndex(), m.GetLogTerm()
 		rindex := r.RaftLog.LastIndex()
 		rterm, _ := r.RaftLog.Term(rindex)
+		//log.Println("mterm, ", mterm, "rterm, ", rterm, "mindex, ", mindex, "rindex, ", rindex)
 		if mterm > rterm || (mterm == rterm && mindex >= rindex) {
 			willVote = true
 		}
@@ -364,6 +396,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		Term:    r.Term,
 		Reject:  !willVote,
 	})
+	//log.Println(m.GetFrom(), " request ", r.id, " to vote, ", willVote, ", after that term is ", r.Term)
 	if willVote {
 		r.Vote = m.GetFrom()
 	}
@@ -393,6 +426,12 @@ func (r *Raft) handleBeat(m pb.Message) {
 			}
 		}
 	}
+}
+
+func (r *Raft) handleAppendResponse(m pb.Message) {
+	// log.Printf("Received from %d, index is %d\n", m.GetFrom(), m.GetIndex())
+	r.Prs[m.GetFrom()].Next = m.GetIndex() + 1
+	r.RaftLog.committed = m.GetIndex()
 }
 
 // handleHeartbeat handle Heartbeat RPC request

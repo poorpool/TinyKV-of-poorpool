@@ -53,6 +53,7 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
+	lastIndex uint64 // 最后一个元素的 index
 }
 
 // newLog returns log using the given storage. It recovers the log
@@ -72,7 +73,8 @@ func newLog(storage Storage) *RaftLog {
 		log.Println(err)
 	}
 	return &RaftLog{
-		entries: entries,
+		entries:   entries,
+		lastIndex: ls,
 	}
 }
 
@@ -86,7 +88,30 @@ func (l *RaftLog) maybeCompact() {
 // unstableEntries return all the unstable entries
 func (l *RaftLog) unstableEntries() []pb.Entry {
 	// Your Code Here (2A).
-	return nil
+	var entries []pb.Entry
+	for _, v := range l.entries {
+		if v.GetIndex() > l.committed {
+			entries = append(entries, v)
+		}
+	}
+	return entries
+}
+func (l *RaftLog) unstableEntryPointersFromIndexWithPrevIndexAndTerm(i uint64) ([]*pb.Entry, uint64, uint64) {
+	var entries []*pb.Entry
+	var index, logTerm uint64
+	for _, v := range l.entries {
+		if v.GetIndex() >= i {
+			entries = append(entries, &pb.Entry{
+				Term:  v.GetTerm(),
+				Index: v.GetIndex(),
+				Data:  v.GetData(),
+			})
+		} else {
+			index = v.GetIndex()
+			logTerm = v.GetTerm()
+		}
+	}
+	return entries, index, logTerm
 }
 
 // nextEnts returns all the committed but not applied entries
@@ -98,10 +123,7 @@ func (l *RaftLog) nextEnts() (ents []pb.Entry) {
 // LastIndex return the last index of the log entries
 func (l *RaftLog) LastIndex() uint64 {
 	// Your Code Here (2A).
-	if len(l.entries) == 0 {
-		return 0
-	}
-	return l.entries[len(l.entries)-1].Index
+	return l.lastIndex
 }
 
 // Term return the term of the entry in the given index
@@ -113,4 +135,15 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 		}
 	}
 	return 0, nil
+}
+
+func (l *RaftLog) AppendEntries(entries []*pb.Entry, term uint64) {
+	for _, v := range entries {
+		l.lastIndex++
+		l.entries = append(l.entries, pb.Entry{
+			Term:  term,
+			Index: l.lastIndex,
+			Data:  v.GetData(),
+		})
+	}
 }
