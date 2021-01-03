@@ -176,8 +176,12 @@ func newRaft(c *Config) *Raft {
 		RaftLog:          newLog(c.Storage),
 		Prs:              map[uint64]*Progress{},
 		votes:            map[uint64]bool{},
-		Term:             hardState.GetTerm(),
 	}
+	term, _ := r.RaftLog.Term(r.RaftLog.lastIndex)
+	if term == 0 {
+		term = hardState.GetTerm()
+	}
+	r.Term = term
 	r.electionRandomTimeout = rand.Intn(r.electionTimeout) + r.electionTimeout
 	for _, v := range c.peers {
 		r.Prs[v] = &Progress{
@@ -185,6 +189,7 @@ func newRaft(c *Config) *Raft {
 			Next:  1,
 		}
 	}
+	//log.Printf("Up a Raft %d, Vote %d, Term %d\n", r.id, r.Vote, term)
 	return r
 }
 
@@ -193,6 +198,7 @@ func newRaft(c *Config) *Raft {
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
 	entries, index, logTerm := r.RaftLog.unstableEntryPointersFromIndexWithPrevIndexAndTerm(r.Prs[to].Next)
+	//log.Printf("send to %d, entries len %d, index %d, logTerm %d\n", to, len(entries), index, logTerm)
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
 		To:      to,
@@ -215,12 +221,14 @@ func (r *Raft) sendHeartbeat(to uint64) {
 		From:    r.id,
 		Term:    r.Term,
 		MsgType: pb.MessageType_MsgHeartbeat,
+		Commit:  r.RaftLog.committed,
 	})
 }
 
 // tick advances the internal logical clock by a single tick.
 func (r *Raft) tick() {
 	// Your Code Here (2A).
+	//log.Printf("tick...\n")
 	if r.State == StateLeader {
 		r.heartbeatElapsed++
 	}
@@ -298,18 +306,7 @@ func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
 	//log.Println(m.GetMsgType(), m.GetFrom(), m.GetTo())
 	//log.Printf("votedfor? %d\n", r.Vote)
-	if m.From != r.id { // 不处理自己给自己发消息
-		r.electionElapsed = 0
-		var fromTerm = m.GetTerm()
-		if fromTerm > r.Term {
-			if r.State != StateFollower {
-				r.becomeFollower(fromTerm, m.GetFrom())
-			}
-			r.Term = fromTerm
-		} else if fromTerm > 0 && fromTerm < r.Term {
-			return nil // 过期了
-		}
-	}
+
 	switch m.GetMsgType() { // todo: 在这儿使用反射
 	case pb.MessageType_MsgRequestVote:
 		r.handleRequestVote(m) // todo: 理清 heartbeat 和 append 的关系
@@ -325,6 +322,8 @@ func (r *Raft) Step(m pb.Message) error {
 		r.handleBeat(m)
 	case pb.MessageType_MsgAppendResponse:
 		r.handleAppendResponse(m)
+	case pb.MessageType_MsgHeartbeat:
+		r.handleHeartbeat(m)
 	}
 
 	return nil
@@ -333,9 +332,22 @@ func (r *Raft) Step(m pb.Message) error {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+	if m.From != r.id { // 不处理自己给自己发消息
+		r.electionElapsed = 0
+		var fromTerm = m.GetTerm()
+		if fromTerm > r.Term {
+			if r.State != StateFollower {
+				r.becomeFollower(fromTerm, m.GetFrom())
+			}
+			r.Term = fromTerm
+		} else if fromTerm > 0 && fromTerm < r.Term {
+			return // 过期了
+		}
+	}
 	if m.Term >= r.Term && r.State == StateCandidate {
 		r.becomeFollower(m.Term, m.GetFrom())
 	}
+
 	switch r.State {
 	case StateFollower:
 		reject := false
@@ -345,6 +357,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			reject = true
 		}
 		if !reject {
+			//log.Printf("received append from %d", m.GetFrom())
 			var willAppendEntries []*pb.Entry
 			for i, v := range m.GetEntries() {
 				findTerm, _ := r.RaftLog.Term(v.GetIndex())
@@ -358,6 +371,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 					break
 				}
 			}
+			//log.Printf("will append %d items\n", len(willAppendEntries))
 			r.RaftLog.AppendEntriesWithTheirOwnTerm(willAppendEntries)
 			r.RaftLog.committed = m.GetCommit()
 		}
@@ -368,6 +382,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			From:    r.id,
 			Term:    r.Term,
 			Reject:  reject,
+			Index:   r.RaftLog.LastIndex(),
 		})
 	case StateCandidate:
 	case StateLeader:
@@ -376,6 +391,18 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 
 // handlePropose handle Propose RPC request
 func (r *Raft) handlePropose(m pb.Message) {
+	if m.From != r.id { // 不处理自己给自己发消息
+		r.electionElapsed = 0
+		var fromTerm = m.GetTerm()
+		if fromTerm > r.Term {
+			if r.State != StateFollower {
+				r.becomeFollower(fromTerm, m.GetFrom())
+			}
+			r.Term = fromTerm
+		} else if fromTerm > 0 && fromTerm < r.Term {
+			return // 过期了
+		}
+	}
 	if r.State != StateLeader {
 		return
 	}
@@ -397,8 +424,17 @@ func (r *Raft) handlePropose(m pb.Message) {
 
 // handleHup handle Hup request
 func (r *Raft) handleHup(m pb.Message) {
-	if m.GetFrom() != r.id {
-		return
+	if m.From != r.id { // 不处理自己给自己发消息
+		r.electionElapsed = 0
+		var fromTerm = m.GetTerm()
+		if fromTerm > r.Term {
+			if r.State != StateFollower {
+				r.becomeFollower(fromTerm, m.GetFrom())
+			}
+			r.Term = fromTerm
+		} else if fromTerm > 0 && fromTerm < r.Term {
+			return // 过期了
+		}
 	}
 
 	if r.State == StateLeader {
@@ -415,7 +451,7 @@ func (r *Raft) handleHup(m pb.Message) {
 		r.becomeLeader()
 		return
 	}
-	for k, _ := range r.Prs {
+	for k := range r.Prs {
 		if k != r.id {
 			index := r.RaftLog.LastIndex()
 			logTerm, _ := r.RaftLog.Term(index)
@@ -433,7 +469,17 @@ func (r *Raft) handleHup(m pb.Message) {
 
 // handleRequestVote handle RequestVote RPC request
 func (r *Raft) handleRequestVote(m pb.Message) {
+	if m.From != r.id { // 不处理自己给自己发消息
+		r.electionElapsed = 0
+		var fromTerm = m.GetTerm()
+		if fromTerm > r.Term {
+			r.becomeFollower(fromTerm, m.GetFrom())
+		} else if fromTerm > 0 && fromTerm < r.Term {
+			return // 过期了
+		}
+	}
 	willVote := false
+	//log.Printf("%d received request from %d. Request term is %d, its term is %d. He has voted for%d\n", r.id, m.GetFrom(), m.GetTerm(), r.Term, r.Vote)
 	if r.Term <= m.GetTerm() && (r.Vote == 0 || r.Vote == m.GetFrom()) {
 		mindex, mterm := m.GetIndex(), m.GetLogTerm()
 		rindex := r.RaftLog.LastIndex()
@@ -443,6 +489,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 			willVote = true
 		}
 	}
+	// log.Println(willVote)
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgRequestVoteResponse,
 		To:      m.GetFrom(),
@@ -458,20 +505,53 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 
 // handleRequestVoteResponse handle RequestVoteResponse RPC request
 func (r *Raft) handleRequestVoteResponse(m pb.Message) {
-	r.votes[m.GetFrom()] = !m.GetReject()
-	cnt := 0
-	for _, v := range r.votes {
-		if v {
-			cnt++
+	if m.From != r.id { // 不处理自己给自己发消息
+		r.electionElapsed = 0
+		var fromTerm = m.GetTerm()
+		if fromTerm > r.Term {
+			if r.State != StateFollower {
+				r.becomeFollower(fromTerm, m.GetFrom())
+			}
+			r.Term = fromTerm
+		} else if fromTerm > 0 && fromTerm < r.Term {
+			return // 过期了
 		}
 	}
-	if cnt > len(r.Prs)/2 && r.State != StateLeader {
+	if r.State != StateCandidate {
+		return
+	}
+	//log.Printf("%d get vote %v from %d", m.GetTo(), !m.GetReject(), m.GetFrom())
+	r.votes[m.GetFrom()] = !m.GetReject()
+	cntTrue, cntFalse := 0, 0
+	for _, v := range r.votes {
+		if v {
+			cntTrue++
+		} else {
+			cntFalse++
+		}
+	}
+	if cntTrue > len(r.Prs)/2 {
 		r.becomeLeader()
+	}
+	if len(r.Prs)-cntFalse <= len(r.Prs)/2 {
+		r.becomeFollower(r.Term, r.Lead)
 	}
 }
 
 // handleBeat handle Beat request
 func (r *Raft) handleBeat(m pb.Message) {
+	if m.From != r.id { // 不处理自己给自己发消息
+		r.electionElapsed = 0
+		var fromTerm = m.GetTerm()
+		if fromTerm > r.Term {
+			if r.State != StateFollower {
+				r.becomeFollower(fromTerm, m.GetFrom())
+			}
+			r.Term = fromTerm
+		} else if fromTerm > 0 && fromTerm < r.Term {
+			return // 过期了
+		}
+	}
 	if r.State == StateLeader && m.GetFrom() == r.id {
 		r.heartbeatElapsed = 0
 		for k, _ := range r.Prs {
@@ -483,7 +563,19 @@ func (r *Raft) handleBeat(m pb.Message) {
 }
 
 func (r *Raft) handleAppendResponse(m pb.Message) {
-	// log.Printf("Received from %d, index is %d\n", m.GetFrom(), m.GetIndex())
+	if m.From != r.id { // 不处理自己给自己发消息
+		r.electionElapsed = 0
+		var fromTerm = m.GetTerm()
+		if fromTerm > r.Term {
+			if r.State != StateFollower {
+				r.becomeFollower(fromTerm, m.GetFrom())
+			}
+			r.Term = fromTerm
+		} else if fromTerm > 0 && fromTerm < r.Term {
+			return // 过期了
+		}
+	}
+	//log.Printf("Received from %d, index is %d\n", m.GetFrom(), m.GetIndex())
 	if m.GetReject() {
 		r.Prs[m.GetFrom()].Next--
 		r.sendAppend(m.GetFrom())
@@ -503,11 +595,30 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 			r.RaftLog.committed = i
 		}
 	}
+	for k := range r.Prs {
+		if k != r.id {
+			r.sendHeartbeat(k)
+		}
+	}
 }
 
 // handleHeartbeat handle Heartbeat RPC request
 func (r *Raft) handleHeartbeat(m pb.Message) { // fixme: 处理更高任期的心跳似乎在Step里处理了
 	// Your Code Here (2A).
+	if m.From != r.id { // 不处理自己给自己发消息
+		r.electionElapsed = 0
+		var fromTerm = m.GetTerm()
+		if fromTerm > r.Term {
+			if r.State != StateFollower {
+				r.becomeFollower(fromTerm, m.GetFrom())
+			}
+			r.Term = fromTerm
+		} else if fromTerm > 0 && fromTerm < r.Term {
+			return // 过期了
+		}
+	}
+	//log.Printf("%d received heartbeat from %d with commit %d\n", r.id, m.GetFrom(), m.Commit)
+	r.RaftLog.committed = min(r.RaftLog.LastIndex(), m.GetCommit())
 }
 
 // handleSnapshot handle Snapshot RPC request
