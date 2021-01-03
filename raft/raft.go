@@ -214,13 +214,16 @@ func (r *Raft) sendAppend(to uint64) bool {
 }
 
 // sendHeartbeat sends a heartbeat RPC to the given peer.
-func (r *Raft) sendHeartbeat(to uint64) {
+func (r *Raft) sendHeartbeat(to uint64) { // hls说这个也许只是term和leadid，检查检查重构重构
 	// Your Code Here (2A).
+	_, index, logTerm := r.RaftLog.unstableEntryPointersFromIndexWithPrevIndexAndTerm(r.Prs[to].Next)
 	r.msgs = append(r.msgs, pb.Message{
 		To:      to,
 		From:    r.id,
 		Term:    r.Term,
 		MsgType: pb.MessageType_MsgHeartbeat,
+		LogTerm: logTerm, // 要发送的entries前一个term
+		Index:   index,   // 要发送的entries前一个index
 		Commit:  r.RaftLog.committed,
 	})
 }
@@ -332,14 +335,13 @@ func (r *Raft) Step(m pb.Message) error {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+	//log.Printf("%d received msgAppend from %d\n", r.id, m.GetFrom())
 	if m.From != r.id { // 不处理自己给自己发消息
 		r.electionElapsed = 0
 		var fromTerm = m.GetTerm()
+		r.Lead = m.GetFrom()
 		if fromTerm > r.Term {
-			if r.State != StateFollower {
-				r.becomeFollower(fromTerm, m.GetFrom())
-			}
-			r.Term = fromTerm
+			r.becomeFollower(fromTerm, m.GetFrom())
 		} else if fromTerm > 0 && fromTerm < r.Term {
 			return // 过期了
 		}
@@ -373,7 +375,11 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			}
 			//log.Printf("will append %d items\n", len(willAppendEntries))
 			r.RaftLog.AppendEntriesWithTheirOwnTerm(willAppendEntries)
-			r.RaftLog.committed = m.GetCommit()
+			if len(m.GetEntries()) > 0 {
+				r.RaftLog.committed = min(m.GetCommit(), m.GetEntries()[len(m.GetEntries())-1].GetIndex()) // fixme: to pass raft_test556
+			} else {
+				r.RaftLog.committed = min(m.GetCommit(), m.GetIndex())
+			}
 		}
 		//log.Println("append reject? ", reject)
 		r.msgs = append(r.msgs, pb.Message{
@@ -391,6 +397,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 
 // handlePropose handle Propose RPC request
 func (r *Raft) handlePropose(m pb.Message) {
+	//log.Printf("%d received propose\n", r.id)
 	if m.From != r.id { // 不处理自己给自己发消息
 		r.electionElapsed = 0
 		var fromTerm = m.GetTerm()
@@ -473,7 +480,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 		r.electionElapsed = 0
 		var fromTerm = m.GetTerm()
 		if fromTerm > r.Term {
-			r.becomeFollower(fromTerm, m.GetFrom())
+			r.becomeFollower(fromTerm, 0) // 投票但是不标记为自己领导
 		} else if fromTerm > 0 && fromTerm < r.Term {
 			return // 过期了
 		}
@@ -583,6 +590,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	}
 	r.Prs[m.GetFrom()].Next = m.GetIndex() + 1
 	r.Prs[m.GetFrom()].Match = m.GetIndex()
+	var changed = false
 	for i := r.RaftLog.committed + 1; i <= r.RaftLog.lastIndex; i++ {
 		cnt := 0
 		for k, v := range r.Prs {
@@ -593,32 +601,33 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 		logTerm, _ := r.RaftLog.Term(i)
 		if logTerm == r.Term && cnt+1 > len(r.Prs)/2 {
 			r.RaftLog.committed = i
+			changed = true
 		}
 	}
-	for k := range r.Prs {
-		if k != r.id {
-			r.sendHeartbeat(k)
+	if changed {
+
+		for k := range r.Prs {
+			if k != r.id {
+				r.sendAppend(k)
+			}
 		}
 	}
 }
 
 // handleHeartbeat handle Heartbeat RPC request
-func (r *Raft) handleHeartbeat(m pb.Message) { // fixme: 处理更高任期的心跳似乎在Step里处理了
+func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
 	if m.From != r.id { // 不处理自己给自己发消息
 		r.electionElapsed = 0
 		var fromTerm = m.GetTerm()
 		if fromTerm > r.Term {
-			if r.State != StateFollower {
-				r.becomeFollower(fromTerm, m.GetFrom())
-			}
-			r.Term = fromTerm
+			r.becomeFollower(fromTerm, m.GetFrom())
 		} else if fromTerm > 0 && fromTerm < r.Term {
 			return // 过期了
 		}
 	}
-	//log.Printf("%d received heartbeat from %d with commit %d\n", r.id, m.GetFrom(), m.Commit)
-	r.RaftLog.committed = min(r.RaftLog.LastIndex(), m.GetCommit())
+	//log.Printf("%d received heartbeat from %d with commit %d, its lastIndex %d\n", r.id, m.GetFrom(), m.GetCommit(), r.RaftLog.LastIndex())
+	r.RaftLog.committed = min(m.GetCommit(), m.GetIndex())
 }
 
 // handleSnapshot handle Snapshot RPC request
