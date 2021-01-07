@@ -189,6 +189,7 @@ func newRaft(c *Config) *Raft {
 			Next:  1,
 		}
 	}
+	r.RaftLog.committed = hardState.GetCommit()
 	return r
 }
 
