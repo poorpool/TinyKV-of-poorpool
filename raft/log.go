@@ -97,6 +97,7 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 	}
 	return entries
 }
+
 func (l *RaftLog) unstableEntryPointersFromIndexWithPrevIndexAndTerm(i uint64) ([]*pb.Entry, uint64, uint64) {
 	var entries []*pb.Entry
 	var index, logTerm uint64
@@ -182,3 +183,14 @@ func (l *RaftLog) DeleteFromIndex(index uint64) {
 	l.applied = min(l.applied, l.lastIndex)
 	l.stabled = min(l.stabled, l.lastIndex)
 }
+
+/*
+func (l *RaftLog) removeNoopEntries(entries []pb.Entry) []pb.Entry {
+	var ent []pb.Entry
+	for _, v := range entries {
+		if v.GetData() != nil {
+			ent = append(ent, v)
+		}
+	}
+	return ent
+}*/
