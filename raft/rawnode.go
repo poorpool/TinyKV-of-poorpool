@@ -148,13 +148,22 @@ func (rn *RawNode) Ready() Ready {
 		Entries:          rn.Raft.RaftLog.unstableEntries(),
 		Snapshot:         pb.Snapshot{},
 		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
-		Messages:         nil,
+		Messages:         rn.Raft.msgs, // fixme: 是不是应该在advance里面清空消息
 	}
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
 func (rn *RawNode) HasReady() bool {
 	// Your Code Here (2A).
+	if len(rn.Raft.RaftLog.unstableEntries()) > 0 {
+		return true
+	}
+	if len(rn.Raft.RaftLog.nextEnts()) > 0 {
+		return true
+	}
+	if len(rn.Raft.msgs) > 0 {
+		return true
+	}
 	return false
 }
 
@@ -166,7 +175,6 @@ func (rn *RawNode) Advance(rd Ready) {
 		rn.Raft.RaftLog.stabled = rd.Entries[len(rd.Entries)-1].GetIndex()
 	}
 	if len(rd.CommittedEntries) > 0 {
-
 		rn.Raft.RaftLog.applied = rd.CommittedEntries[len(rd.CommittedEntries)-1].GetIndex()
 	}
 }
