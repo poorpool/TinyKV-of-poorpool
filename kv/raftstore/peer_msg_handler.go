@@ -43,6 +43,17 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	// Your Code Here (2B).
+	if !d.RaftGroup.HasReady() {
+		return
+	}
+	rd := d.RaftGroup.Ready()
+	d.peerStorage.SaveReadyState(&rd)
+	for _, v := range rd.CommittedEntries {
+
+	}
+
+	d.Send(d.ctx.trans, rd.Messages) // 发送消息
+	d.RaftGroup.Advance(rd)
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -114,6 +125,23 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 		return
 	}
 	// Your Code Here (2B).
+	for _, req := range msg.GetRequests() {
+		data, err := req.Marshal() // 将通过 raft 同步、提交的 byte[]
+		if err != nil {
+			cb.Done(ErrResp(err))
+			return
+		}
+		d.proposals = append(d.proposals, &proposal{
+			index: d.nextProposalIndex(),
+			term:  d.Term(),
+			cb:    cb,
+		})
+		err = d.RaftGroup.Propose(data)
+		if err != nil {
+			cb.Done(ErrResp(err))
+			return
+		}
+	}
 }
 
 func (d *peerMsgHandler) onTick() {

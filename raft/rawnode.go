@@ -148,7 +148,7 @@ func (rn *RawNode) Ready() Ready {
 		Entries:          rn.Raft.RaftLog.unstableEntries(),
 		Snapshot:         pb.Snapshot{},
 		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
-		Messages:         rn.Raft.msgs, // fixme: 是不是应该在advance里面清空消息
+		Messages:         rn.Raft.msgs,
 	}
 }
 
@@ -177,6 +177,7 @@ func (rn *RawNode) Advance(rd Ready) {
 	if len(rd.CommittedEntries) > 0 {
 		rn.Raft.RaftLog.applied = rd.CommittedEntries[len(rd.CommittedEntries)-1].GetIndex()
 	}
+	rn.Raft.msgs = []pb.Message{} // 清空消息
 }
 
 // GetProgress return the the Progress of this node and its peers, if this

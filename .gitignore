@@ -6,3 +6,4 @@ bin/*
 _tools
 /vendor
 tmp.tmp
+tester
