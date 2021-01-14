@@ -54,8 +54,8 @@ func (d *peerMsgHandler) findAndDeleteProposal(x uint64) *proposal {
 func (d *peerMsgHandler) applyAndResponseEntry(kvWB *engine_util.WriteBatch, entry pb.Entry) *engine_util.WriteBatch {
 	msg := &raft_cmdpb.Request{}
 	msg.Unmarshal(entry.GetData())
-	log.Info("Touch applyAndResponseEntry")
-	log.Info(msg)
+	//log.Info("Touch applyAndResponseEntry")
+	//log.Info(msg)
 	switch msg.CmdType {
 	case raft_cmdpb.CmdType_Get:
 		// 立刻写入
@@ -124,12 +124,12 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	rd := d.RaftGroup.Ready()
-	log.Info("HandleRaftReady")
-	log.Info(rd.Entries)
-	log.Info(rd.CommittedEntries)
-	val, _ := engine_util.GetCF(d.peerStorage.Engines.Kv, engine_util.CfDefault, []byte("0 00000000"))
+	//log.Info("HandleRaftReady")
+	//log.Info(rd.Entries)
+	//log.Info(rd.CommittedEntries)
+	//val, _ := engine_util.GetCF(d.peerStorage.Engines.Kv, engine_util.CfDefault, []byte("0 00000000"))
 
-	log.Info("before, ", val)
+	//log.Info("before, ", val)
 	d.peerStorage.SaveReadyState(&rd)
 	d.Send(d.ctx.trans, rd.Messages) // 发送消息
 
@@ -147,9 +147,9 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	}
 	d.RaftGroup.Advance(rd)
 
-	val, _ = engine_util.GetCF(d.peerStorage.Engines.Kv, engine_util.CfDefault, []byte("0 00000000"))
+	//val, _ = engine_util.GetCF(d.peerStorage.Engines.Kv, engine_util.CfDefault, []byte("0 00000000"))
 
-	log.Info("after, ", val)
+	//log.Info("after, ", val)
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {

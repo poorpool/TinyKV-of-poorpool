@@ -167,7 +167,7 @@ func newRaft(c *Config) *Raft {
 	}
 	// Your Code Here (2A).
 	rand.Seed(time.Now().UnixNano())
-	hardState, _, _ := c.Storage.InitialState()
+	hardState, confState, _ := c.Storage.InitialState()
 	r := &Raft{
 		id:               c.ID,
 		electionTimeout:  c.ElectionTick,
@@ -183,7 +183,11 @@ func newRaft(c *Config) *Raft {
 	}
 	r.Term = term
 	r.electionRandomTimeout = rand.Intn(r.electionTimeout) + r.electionTimeout
+	if c.peers == nil {
+		c.peers = confState.Nodes
+	}
 	for _, v := range c.peers {
+		//log.Printf("Initial: %d has peer %d\n", r.id, v)
 		r.Prs[v] = &Progress{
 			Match: 0,
 			Next:  1,
@@ -303,6 +307,10 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
+	fromTerm := m.GetTerm()
+	if fromTerm > r.Term {
+		r.becomeFollower(fromTerm, None)
+	}
 	switch m.GetMsgType() { // todo: 在这儿使用反射
 	case pb.MessageType_MsgRequestVote:
 		r.handleRequestVote(m) // todo: 理清 heartbeat 和 append 的关系
@@ -327,48 +335,11 @@ func (r *Raft) Step(m pb.Message) error {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
-	if m.From != r.id { // 不处理自己给自己发消息
-		r.electionElapsed = 0
-		var fromTerm = m.GetTerm()
-		r.Lead = m.GetFrom()
-		if fromTerm > r.Term {
-			r.becomeFollower(fromTerm, m.GetFrom())
-		} else if fromTerm > 0 && fromTerm < r.Term {
-			return // 过期了
-		}
-	}
-	if m.Term >= r.Term && r.State == StateCandidate {
-		r.becomeFollower(m.Term, m.GetFrom())
-	}
-	switch r.State {
-	case StateFollower:
-		reject := false
-		prevLogIndex, prevLogTerm := m.GetIndex(), m.GetLogTerm()
-		findTerm, _ := r.RaftLog.Term(prevLogIndex)
-		if findTerm != prevLogTerm {
-			reject = true
-		}
-		if !reject {
-			var willAppendEntries []*pb.Entry
-			for i, v := range m.GetEntries() {
-				findTerm, _ := r.RaftLog.Term(v.GetIndex())
-				if findTerm != 0 && findTerm != v.GetTerm() {
-					r.RaftLog.DeleteFromIndex(v.GetIndex())
-					willAppendEntries = m.GetEntries()[i:]
-					break
-				}
-				if findTerm == 0 {
-					willAppendEntries = m.GetEntries()[i:]
-					break
-				}
-			}
-			r.RaftLog.AppendEntriesWithTheirOwnTerm(willAppendEntries)
-			if len(m.GetEntries()) > 0 {
-				r.RaftLog.committed = min(m.GetCommit(), m.GetEntries()[len(m.GetEntries())-1].GetIndex()) // fixme: to pass raft_test556
-			} else {
-				r.RaftLog.committed = min(m.GetCommit(), m.GetIndex())
-			}
-		}
+	reject := false
+	r.electionElapsed = 0
+	var fromTerm = m.GetTerm()
+	if fromTerm > 0 && fromTerm < r.Term {
+		reject = true
 		r.msgs = append(r.msgs, pb.Message{
 			MsgType: pb.MessageType_MsgAppendResponse,
 			To:      m.GetFrom(),
@@ -377,13 +348,54 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 			Reject:  reject,
 			Index:   r.RaftLog.LastIndex(),
 		})
-	case StateCandidate:
-	case StateLeader:
+		return
 	}
+	r.Lead = m.GetFrom()
+	if fromTerm >= r.Term && r.State == StateCandidate {
+		r.becomeFollower(m.Term, m.GetFrom())
+	}
+
+	prevLogIndex, prevLogTerm := m.GetIndex(), m.GetLogTerm()
+	findTerm, _ := r.RaftLog.Term(prevLogIndex)
+	if findTerm != prevLogTerm {
+		reject = true
+	}
+	if !reject {
+		var willAppendEntries []*pb.Entry
+		for i, v := range m.GetEntries() {
+			findTerm, _ := r.RaftLog.Term(v.GetIndex())
+			if findTerm != 0 && findTerm != v.GetTerm() {
+				r.RaftLog.DeleteFromIndex(v.GetIndex())
+				willAppendEntries = m.GetEntries()[i:]
+				break
+			}
+			if findTerm == 0 {
+				willAppendEntries = m.GetEntries()[i:]
+				break
+			}
+		}
+		r.RaftLog.AppendEntriesWithTheirOwnTerm(willAppendEntries)
+		if len(m.GetEntries()) > 0 {
+			r.RaftLog.committed = min(m.GetCommit(), m.GetEntries()[len(m.GetEntries())-1].GetIndex()) // fixme: to pass raft_test556
+		} else {
+			r.RaftLog.committed = min(m.GetCommit(), m.GetIndex())
+		}
+	}
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgAppendResponse,
+		To:      m.GetFrom(),
+		From:    r.id,
+		Term:    r.Term,
+		Reject:  reject,
+		Index:   r.RaftLog.LastIndex(),
+	})
 }
 
 // handlePropose handle Propose RPC request
 func (r *Raft) handlePropose(m pb.Message) {
+	if r.State != StateLeader {
+		panic("poorpool: Not leader but get propose")
+	}
 	if m.From != r.id { // 不处理自己给自己发消息
 		r.electionElapsed = 0
 		var fromTerm = m.GetTerm()
@@ -401,7 +413,9 @@ func (r *Raft) handlePropose(m pb.Message) {
 	}
 	entries := m.GetEntries()
 	r.RaftLog.AppendEntries(entries, r.Term)
+	//log.Printf("%d get propose from", r.id)
 	for k, _ := range r.Prs {
+		//log.Printf("%d has peer %d\n", r.id, k)
 		if k != r.id {
 			r.sendAppend(k)
 		}
