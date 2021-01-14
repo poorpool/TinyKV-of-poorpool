@@ -56,7 +56,7 @@ func (c *Cluster) Start() {
 	clusterID := c.schedulerClient.GetClusterID(ctx)
 
 	for storeID := uint64(1); storeID <= uint64(c.count); storeID++ {
-		dbPath, err := ioutil.TempDir("", "test-raftstore")
+		dbPath, err := ioutil.TempDir("/home/poorpool/tinykvtmp", "test-raftstore") // 为了不使用 tmpfs
 		if err != nil {
 			panic(err)
 		}
@@ -306,6 +306,7 @@ func (c *Cluster) MustPutCF(cf string, key, value []byte) {
 		panic("len(resp.Responses) != 1")
 	}
 	if resp.Responses[0].CmdType != raft_cmdpb.CmdType_Put {
+		log.Info("poorpool: CmdType", resp.Responses[0].CmdType)
 		panic("resp.Responses[0].CmdType != raft_cmdpb.CmdType_Put")
 	}
 }

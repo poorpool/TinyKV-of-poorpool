@@ -70,6 +70,9 @@ project2ac:
 project2b:
 	$(GOTEST) ./kv/test_raftstore -run 2B
 
+project2b1:
+	$(GOTEST) ./kv/test_raftstore -run PersistConcurrent
+
 project2c:
 	$(GOTEST) ./raft ./kv/test_raftstore -run 2C
 

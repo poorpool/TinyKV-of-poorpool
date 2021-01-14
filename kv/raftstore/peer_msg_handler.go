@@ -65,35 +65,55 @@ func (d *peerMsgHandler) applyAndResponseEntry(kvWB *engine_util.WriteBatch, ent
 		kvWB = new(engine_util.WriteBatch)
 		p := d.findAndDeleteProposal(entry.GetIndex())
 		if p != nil {
-			getRequest := msg.GetGet()
-			data, _ := engine_util.GetCF(d.peerStorage.Engines.Kv, getRequest.GetCf(), getRequest.GetKey())
-			resp := newCmdResp()
-			resp.Responses = []*raft_cmdpb.Response{
-				{CmdType: raft_cmdpb.CmdType_Get, Get: &raft_cmdpb.GetResponse{Value: data}},
+			if p.term == entry.GetTerm() {
+				getRequest := msg.GetGet()
+				data, _ := engine_util.GetCF(d.peerStorage.Engines.Kv, getRequest.GetCf(), getRequest.GetKey())
+				resp := newCmdResp()
+				resp.Responses = []*raft_cmdpb.Response{
+					{CmdType: raft_cmdpb.CmdType_Get, Get: &raft_cmdpb.GetResponse{Value: data}},
+				}
+				p.cb.Done(resp)
+			} else {
+				NotifyStaleReq(entry.GetTerm(), p.cb)
 			}
-			p.cb.Done(resp)
 		}
 	case raft_cmdpb.CmdType_Put:
 		putRequest := msg.GetPut()
 		kvWB.SetCF(putRequest.GetCf(), putRequest.GetKey(), putRequest.GetValue())
+		d.peerStorage.applyState.AppliedIndex = entry.GetIndex()
+		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+		kvWB.WriteToDB(d.peerStorage.Engines.Kv)
+		kvWB = new(engine_util.WriteBatch)
 		p := d.findAndDeleteProposal(entry.GetIndex())
 		if p != nil {
-			resp := newCmdResp()
-			resp.Responses = []*raft_cmdpb.Response{
-				{CmdType: raft_cmdpb.CmdType_Put, Put: &raft_cmdpb.PutResponse{}},
+			if p.term == entry.GetTerm() {
+				resp := newCmdResp()
+				resp.Responses = []*raft_cmdpb.Response{
+					{CmdType: raft_cmdpb.CmdType_Put, Put: &raft_cmdpb.PutResponse{}},
+				}
+				p.cb.Done(resp)
+			} else {
+				NotifyStaleReq(entry.GetTerm(), p.cb)
 			}
-			p.cb.Done(resp)
 		}
 	case raft_cmdpb.CmdType_Delete:
 		deleteRequest := msg.GetDelete()
 		kvWB.DeleteCF(deleteRequest.GetCf(), deleteRequest.GetKey())
+		d.peerStorage.applyState.AppliedIndex = entry.GetIndex()
+		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+		kvWB.WriteToDB(d.peerStorage.Engines.Kv)
+		kvWB = new(engine_util.WriteBatch)
 		p := d.findAndDeleteProposal(entry.GetIndex())
 		if p != nil {
-			resp := newCmdResp()
-			resp.Responses = []*raft_cmdpb.Response{
-				{CmdType: raft_cmdpb.CmdType_Delete, Delete: &raft_cmdpb.DeleteResponse{}},
+			if p.term == entry.GetTerm() {
+				resp := newCmdResp()
+				resp.Responses = []*raft_cmdpb.Response{
+					{CmdType: raft_cmdpb.CmdType_Delete, Delete: &raft_cmdpb.DeleteResponse{}},
+				}
+				p.cb.Done(resp)
+			} else {
+				NotifyStaleReq(entry.GetTerm(), p.cb)
 			}
-			p.cb.Done(resp)
 		}
 	case raft_cmdpb.CmdType_Snap:
 		// 立刻写入
@@ -103,12 +123,16 @@ func (d *peerMsgHandler) applyAndResponseEntry(kvWB *engine_util.WriteBatch, ent
 		kvWB = new(engine_util.WriteBatch)
 		p := d.findAndDeleteProposal(entry.GetIndex())
 		if p != nil {
-			resp := newCmdResp()
-			resp.Responses = []*raft_cmdpb.Response{
-				{CmdType: raft_cmdpb.CmdType_Snap, Snap: &raft_cmdpb.SnapResponse{Region: d.Region()}},
+			if p.term == entry.GetTerm() {
+				resp := newCmdResp()
+				resp.Responses = []*raft_cmdpb.Response{
+					{CmdType: raft_cmdpb.CmdType_Snap, Snap: &raft_cmdpb.SnapResponse{Region: d.Region()}},
+				}
+				p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+				p.cb.Done(resp)
+			} else {
+				NotifyStaleReq(entry.GetTerm(), p.cb)
 			}
-			p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
-			p.cb.Done(resp)
 		}
 	default:
 	}
@@ -141,7 +165,6 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		}
 
 		d.peerStorage.applyState.AppliedIndex = rd.CommittedEntries[len(rd.CommittedEntries)-1].GetIndex()
-		// fixme: applyState 的 TruncatedState 应该不是 2B 的内容？
 		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
 		kvWB.WriteToDB(d.peerStorage.Engines.Kv)
 	}
@@ -228,7 +251,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 			return
 		}
 		d.proposals = append(d.proposals, &proposal{
-			index: d.nextProposalIndex(),
+			index: d.nextProposalIndex(), // 这儿冲突错误？
 			term:  d.Term(),
 			cb:    cb,
 		})
