@@ -2,6 +2,9 @@ package raftstore
 
 import (
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
+	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -38,6 +41,80 @@ func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 	}
 }
 
+func (d *peerMsgHandler) findAndDeleteProposal(x uint64) *proposal {
+	for i, v := range d.proposals {
+		if v.index == x {
+			d.proposals = append(d.proposals[:i], d.proposals[i+1:]...)
+			return v
+		}
+	}
+	return nil
+}
+
+func (d *peerMsgHandler) applyAndResponseEntry(kvWB *engine_util.WriteBatch, entry pb.Entry) *engine_util.WriteBatch {
+	msg := &raft_cmdpb.Request{}
+	msg.Unmarshal(entry.GetData())
+	log.Info("Touch applyAndResponseEntry")
+	log.Info(msg)
+	switch msg.CmdType {
+	case raft_cmdpb.CmdType_Get:
+		// 立刻写入
+		d.peerStorage.applyState.AppliedIndex = entry.GetIndex()
+		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+		kvWB.WriteToDB(d.peerStorage.Engines.Kv)
+		kvWB = new(engine_util.WriteBatch)
+		p := d.findAndDeleteProposal(entry.GetIndex())
+		if p != nil {
+			getRequest := msg.GetGet()
+			data, _ := engine_util.GetCF(d.peerStorage.Engines.Kv, getRequest.GetCf(), getRequest.GetKey())
+			resp := newCmdResp()
+			resp.Responses = []*raft_cmdpb.Response{
+				{CmdType: raft_cmdpb.CmdType_Get, Get: &raft_cmdpb.GetResponse{Value: data}},
+			}
+			p.cb.Done(resp)
+		}
+	case raft_cmdpb.CmdType_Put:
+		putRequest := msg.GetPut()
+		kvWB.SetCF(putRequest.GetCf(), putRequest.GetKey(), putRequest.GetValue())
+		p := d.findAndDeleteProposal(entry.GetIndex())
+		if p != nil {
+			resp := newCmdResp()
+			resp.Responses = []*raft_cmdpb.Response{
+				{CmdType: raft_cmdpb.CmdType_Put, Put: &raft_cmdpb.PutResponse{}},
+			}
+			p.cb.Done(resp)
+		}
+	case raft_cmdpb.CmdType_Delete:
+		deleteRequest := msg.GetDelete()
+		kvWB.DeleteCF(deleteRequest.GetCf(), deleteRequest.GetKey())
+		p := d.findAndDeleteProposal(entry.GetIndex())
+		if p != nil {
+			resp := newCmdResp()
+			resp.Responses = []*raft_cmdpb.Response{
+				{CmdType: raft_cmdpb.CmdType_Delete, Delete: &raft_cmdpb.DeleteResponse{}},
+			}
+			p.cb.Done(resp)
+		}
+	case raft_cmdpb.CmdType_Snap:
+		// 立刻写入
+		d.peerStorage.applyState.AppliedIndex = entry.GetIndex()
+		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+		kvWB.WriteToDB(d.peerStorage.Engines.Kv)
+		kvWB = new(engine_util.WriteBatch)
+		p := d.findAndDeleteProposal(entry.GetIndex())
+		if p != nil {
+			resp := newCmdResp()
+			resp.Responses = []*raft_cmdpb.Response{
+				{CmdType: raft_cmdpb.CmdType_Snap, Snap: &raft_cmdpb.SnapResponse{Region: d.Region()}},
+			}
+			p.cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+			p.cb.Done(resp)
+		}
+	default:
+	}
+	return kvWB
+}
+
 func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped {
 		return
@@ -47,13 +124,32 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	rd := d.RaftGroup.Ready()
+	log.Info("HandleRaftReady")
+	log.Info(rd.Entries)
+	log.Info(rd.CommittedEntries)
+	val, _ := engine_util.GetCF(d.peerStorage.Engines.Kv, engine_util.CfDefault, []byte("0 00000000"))
+
+	log.Info("before, ", val)
 	d.peerStorage.SaveReadyState(&rd)
-	for _, v := range rd.CommittedEntries {
-
-	}
-
 	d.Send(d.ctx.trans, rd.Messages) // 发送消息
+
+	// apply
+	if len(rd.CommittedEntries) > 0 {
+		kvWB := new(engine_util.WriteBatch)
+		for _, v := range rd.CommittedEntries {
+			kvWB = d.applyAndResponseEntry(kvWB, v)
+		}
+
+		d.peerStorage.applyState.AppliedIndex = rd.CommittedEntries[len(rd.CommittedEntries)-1].GetIndex()
+		// fixme: applyState 的 TruncatedState 应该不是 2B 的内容？
+		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+		kvWB.WriteToDB(d.peerStorage.Engines.Kv)
+	}
 	d.RaftGroup.Advance(rd)
+
+	val, _ = engine_util.GetCF(d.peerStorage.Engines.Kv, engine_util.CfDefault, []byte("0 00000000"))
+
+	log.Info("after, ", val)
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {

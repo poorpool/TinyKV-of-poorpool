@@ -69,12 +69,17 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+	lastHardState pb.HardState // 为了实现 HardState will be equal to empty state if there is no update.
 }
 
 // NewRawNode returns a new RawNode given configuration and a list of raft peers.
 func NewRawNode(config *Config) (*RawNode, error) {
 	// Your Code Here (2A).
-	return &RawNode{Raft: newRaft(config)}, nil
+	rn := &RawNode{
+		Raft: newRaft(config),
+	}
+	rn.lastHardState = rn.GetHardState()
+	return rn, nil
 }
 
 // Tick advances the internal logical clock by a single tick.
@@ -139,17 +144,28 @@ func (rn *RawNode) Step(m pb.Message) error {
 	return ErrStepPeerNotFound
 }
 
+func (rn *RawNode) GetHardState() pb.HardState {
+	return pb.HardState{
+		Term:   rn.Raft.Term,
+		Vote:   rn.Raft.Vote,
+		Commit: rn.Raft.RaftLog.committed,
+	}
+}
+
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
-	return Ready{
+	rd := Ready{
 		SoftState:        nil,
-		HardState:        pb.HardState{},
 		Entries:          rn.Raft.RaftLog.unstableEntries(),
 		Snapshot:         pb.Snapshot{},
 		CommittedEntries: rn.Raft.RaftLog.nextEnts(),
 		Messages:         rn.Raft.msgs,
 	}
+	if !isHardStateEqual(rn.lastHardState, rn.GetHardState()) {
+		rd.HardState = rn.GetHardState()
+	}
+	return rd
 }
 
 // HasReady called when RawNode user need to check if any Ready pending.
@@ -164,6 +180,9 @@ func (rn *RawNode) HasReady() bool {
 	if len(rn.Raft.msgs) > 0 {
 		return true
 	}
+	if !IsEmptyHardState(rn.GetHardState()) && !isHardStateEqual(rn.lastHardState, rn.GetHardState()) {
+		return true
+	}
 	return false
 }
 
@@ -171,6 +190,9 @@ func (rn *RawNode) HasReady() bool {
 // last Ready results.
 func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
+	if !IsEmptyHardState(rd.HardState) {
+		rn.lastHardState = rd.HardState
+	}
 	if len(rd.Entries) > 0 {
 		rn.Raft.RaftLog.stabled = rd.Entries[len(rd.Entries)-1].GetIndex()
 	}

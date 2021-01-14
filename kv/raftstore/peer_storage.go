@@ -308,7 +308,23 @@ func ClearMeta(engines *engine_util.Engines, kvWB, raftWB *engine_util.WriteBatc
 // never be committed
 func (ps *PeerStorage) Append(entries []eraftpb.Entry, raftWB *engine_util.WriteBatch) error {
 	// Your Code Here (2B).
-	// fixme: 这儿是直接写进去 raft 数据库？
+	if len(entries) == 0 {
+		return nil
+	}
+	psFirst, _ := ps.FirstIndex()
+	psLast, _ := ps.LastIndex()
+	last := entries[len(entries)-1].GetIndex()
+	if last < psFirst {
+		return nil
+	}
+	for i := last + 1; i <= psLast; i++ {
+		raftWB.DeleteMeta(meta.RaftLogKey(ps.region.GetId(), i)) // 删除原来的。不用从 first 开始删，因为 SetMeta 会覆盖
+	}
+	for _, v := range entries {
+		raftWB.SetMeta(meta.RaftLogKey(ps.region.GetId(), v.GetIndex()), &v) // 添加新的
+	}
+	ps.raftState.LastIndex = last
+	ps.raftState.LastTerm = entries[len(entries)-1].GetTerm() // 更新 raftState
 	return nil
 }
 
@@ -332,7 +348,13 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, error) {
 	// Hint: you may call `Append()` and `ApplySnapshot()` in this function
 	// Your Code Here (2B/2C).
-	ps.Append(ready.Entries, nil)
+	raftWB := new(engine_util.WriteBatch)
+	ps.Append(ready.Entries, raftWB)
+	if !raft.IsEmptyHardState(ready.HardState) {
+		ps.raftState.HardState = &ready.HardState
+	}
+	raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState) // 更新 RaftLocalState
+	raftWB.WriteToDB(ps.Engines.Raft)
 	return nil, nil
 }
 
