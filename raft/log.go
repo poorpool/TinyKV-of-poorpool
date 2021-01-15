@@ -53,7 +53,10 @@ type RaftLog struct {
 	pendingSnapshot *pb.Snapshot
 
 	// Your Data Here (2A).
+	firstIndex uint64
+	// fixme: 用pendingSnapshot里的？
 	lastIndex uint64 // 最后一个元素的 index
+	lastTerm  uint64 // 最后一个元素的 term
 }
 
 // newLog returns log using the given storage. It recovers the log
@@ -72,11 +75,16 @@ func newLog(storage Storage) *RaftLog {
 	if err != nil {
 		log.Println(err)
 	}
-	return &RaftLog{
+	l := &RaftLog{
 		entries:   entries,
 		lastIndex: ls,
 		stabled:   ls,
+		storage:   storage,
 	}
+	if len(entries) > 0 {
+		l.lastTerm = entries[len(entries)-1].GetTerm()
+	}
+	return l
 }
 
 // We need to compact the log entries in some point of time like
@@ -84,6 +92,7 @@ func newLog(storage Storage) *RaftLog {
 // grow unlimitedly in memory
 func (l *RaftLog) maybeCompact() {
 	// Your Code Here (2C).
+	log.Print("maybeCompact")
 }
 
 // unstableEntries return all the unstable entries
@@ -134,9 +143,16 @@ func (l *RaftLog) LastIndex() uint64 {
 	return l.lastIndex
 }
 
+func (l *RaftLog) FirstIndex() uint64 {
+	return l.firstIndex
+}
+
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
+	if i == l.LastIndex() {
+		return l.lastTerm, nil
+	}
 	for _, v := range l.entries {
 		if v.Index == i {
 			return v.Term, nil
@@ -148,6 +164,7 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 func (l *RaftLog) AppendEntriesWithTheirOwnTerm(entries []*pb.Entry) {
 	for _, v := range entries {
 		l.lastIndex++
+		l.lastTerm = v.GetTerm()
 		l.entries = append(l.entries, pb.Entry{
 			Term:  v.GetTerm(),
 			Index: l.lastIndex,
@@ -159,6 +176,7 @@ func (l *RaftLog) AppendEntriesWithTheirOwnTerm(entries []*pb.Entry) {
 func (l *RaftLog) AppendEntries(entries []*pb.Entry, term uint64) {
 	for _, v := range entries {
 		l.lastIndex++
+		l.lastTerm = term
 		l.entries = append(l.entries, pb.Entry{
 			Term:  term,
 			Index: l.lastIndex,
@@ -176,21 +194,23 @@ func (l *RaftLog) DeleteFromIndex(index uint64) {
 	}
 	if len(l.entries) == 0 {
 		l.lastIndex = 0
+		l.lastTerm = 0
 	} else {
 		l.lastIndex = min(l.lastIndex, l.entries[len(l.entries)-1].Index)
+		l.lastTerm = l.entries[len(l.entries)-1].GetTerm()
 	}
 	l.committed = min(l.committed, l.lastIndex)
 	l.applied = min(l.applied, l.lastIndex)
 	l.stabled = min(l.stabled, l.lastIndex)
 }
 
-/*
-func (l *RaftLog) removeNoopEntries(entries []pb.Entry) []pb.Entry {
-	var ent []pb.Entry
-	for _, v := range entries {
-		if v.GetData() != nil {
-			ent = append(ent, v)
-		}
-	}
-	return ent
-}*/
+func (l *RaftLog) SetLastIndex(index uint64) {
+	l.lastIndex = index
+	l.committed = min(l.committed, l.lastIndex)
+	l.applied = min(l.applied, l.lastIndex)
+	l.stabled = min(l.stabled, l.lastIndex)
+}
+
+func (l *RaftLog) SetFirstIndex(index uint64) {
+	l.firstIndex = index
+}

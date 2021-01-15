@@ -5,6 +5,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"github.com/pingcap-incubator/tinykv/raft"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -51,9 +52,35 @@ func (d *peerMsgHandler) findAndDeleteProposal(x uint64) *proposal {
 	return nil
 }
 
+func (d *peerMsgHandler) applyAdminRequest(kvWB *engine_util.WriteBatch, entry pb.Entry) *engine_util.WriteBatch {
+	msg := &raft_cmdpb.AdminRequest{}
+	msg.Unmarshal(entry.GetData())
+	switch msg.CmdType {
+	case raft_cmdpb.AdminCmdType_CompactLog:
+		log.Info("ask for compact log")
+		log.Info(msg.CompactLog)
+		compactLog := msg.GetCompactLog()
+		index, term := compactLog.GetCompactIndex(), compactLog.GetCompactTerm()
+		applyState := d.peerStorage.applyState
+		if applyState.TruncatedState.GetIndex() <= index {
+			applyState.TruncatedState.Index = index
+			applyState.TruncatedState.Term = term
+			kvWB.SetMeta(meta.ApplyStateKey(d.regionId), applyState)
+			kvWB.WriteToDB(d.peerStorage.Engines.Kv)
+			kvWB = new(engine_util.WriteBatch)
+			d.ScheduleCompactLog(d.RaftGroup.Raft.RaftLog.FirstIndex(), index) // 好像 ScheduleCompactLog 里头没有用到 first，，，
+		}
+	default:
+	}
+	return kvWB
+}
+
 func (d *peerMsgHandler) applyAndResponseEntry(kvWB *engine_util.WriteBatch, entry pb.Entry) *engine_util.WriteBatch {
 	msg := &raft_cmdpb.Request{}
-	msg.Unmarshal(entry.GetData())
+	err := msg.Unmarshal(entry.GetData())
+	if err != nil {
+		return d.applyAdminRequest(kvWB, entry)
+	}
 	//log.Info("Touch applyAndResponseEntry")
 	//log.Info(msg)
 	switch msg.CmdType {
@@ -154,6 +181,10 @@ func (d *peerMsgHandler) HandleRaftReady() {
 	//val, _ := engine_util.GetCF(d.peerStorage.Engines.Kv, engine_util.CfDefault, []byte("0 00000000"))
 
 	//log.Info("before, ", val)
+	//log.Info(rd.Snapshot)
+	if !raft.IsEmptySnap(&rd.Snapshot) {
+		log.Info("OHHHHHH not empty snapshot")
+	}
 	d.peerStorage.SaveReadyState(&rd)
 	d.Send(d.ctx.trans, rd.Messages) // 发送消息
 
@@ -260,6 +291,25 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 			cb.Done(ErrResp(err))
 			return
 		}
+	}
+	adminReq := msg.GetAdminRequest()
+	if adminReq == nil {
+		return
+	}
+	data, err := adminReq.Marshal()
+	if err != nil {
+		cb.Done(ErrResp(err))
+		return
+	}
+	d.proposals = append(d.proposals, &proposal{
+		index: d.nextProposalIndex(),
+		term:  d.Term(),
+		cb:    cb,
+	})
+	err = d.RaftGroup.Propose(data)
+	if err != nil {
+		cb.Done(ErrResp(err))
+		return
 	}
 }
 

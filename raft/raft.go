@@ -215,6 +215,18 @@ func (r *Raft) sendAppend(to uint64) bool {
 	return true
 }
 
+func (r *Raft) sendSnapshot(to uint64) bool {
+	// Your Code Here (2A).
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType:  pb.MessageType_MsgSnapshot,
+		To:       to,
+		From:     r.id,
+		Term:     r.Term,
+		Snapshot: r.RaftLog.pendingSnapshot,
+	})
+	return true
+}
+
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
@@ -307,10 +319,6 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-	fromTerm := m.GetTerm()
-	if fromTerm > r.Term {
-		r.becomeFollower(fromTerm, None)
-	}
 	switch m.GetMsgType() { // todo: 在这儿使用反射
 	case pb.MessageType_MsgRequestVote:
 		r.handleRequestVote(m) // todo: 理清 heartbeat 和 append 的关系
@@ -328,6 +336,8 @@ func (r *Raft) Step(m pb.Message) error {
 		r.handleAppendResponse(m)
 	case pb.MessageType_MsgHeartbeat:
 		r.handleHeartbeat(m)
+	case pb.MessageType_MsgSnapshot:
+		r.handleSnapshot(m)
 	}
 	return nil
 }
@@ -335,9 +345,13 @@ func (r *Raft) Step(m pb.Message) error {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+
+	fromTerm := m.GetTerm()
+	if fromTerm > r.Term {
+		r.becomeFollower(fromTerm, m.GetFrom())
+	}
 	reject := false
 	r.electionElapsed = 0
-	var fromTerm = m.GetTerm()
 	if fromTerm > 0 && fromTerm < r.Term {
 		reject = true
 		r.msgs = append(r.msgs, pb.Message{
@@ -408,12 +422,16 @@ func (r *Raft) handlePropose(m pb.Message) {
 	if r.State != StateLeader {
 		return
 	}
+
 	entries := m.GetEntries()
 	r.RaftLog.AppendEntries(entries, r.Term)
-	//log.Printf("%d get propose from", r.id)
-	for k, _ := range r.Prs {
-		//log.Printf("%d has peer %d\n", r.id, k)
-		if k != r.id {
+	for k, v := range r.Prs {
+		if k == r.id {
+			continue
+		}
+		if r.RaftLog.pendingSnapshot != nil && r.RaftLog.pendingSnapshot.Metadata.Index > v.Next {
+			r.sendSnapshot(k)
+		} else {
 			r.sendAppend(k)
 		}
 	}
@@ -621,6 +639,32 @@ func (r *Raft) handleHeartbeat(m pb.Message) { // fixme: TestHeartbeatUpdateComm
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	if m.From != r.id { // 不处理自己给自己发消息
+		r.electionElapsed = 0
+		var fromTerm = m.GetTerm()
+		if fromTerm > r.Term {
+			r.becomeFollower(fromTerm, m.GetFrom())
+		} else if fromTerm > 0 && fromTerm < r.Term {
+			return // 过期了
+		}
+	}
+
+	snap := m.GetSnapshot()
+	if snap.Metadata.GetIndex() < r.RaftLog.committed {
+		return // fixme: 忽略这个 snapshot，但是这里真的是 committed 吗？
+	}
+	r.RaftLog.SetLastIndex(snap.Metadata.GetIndex())
+	r.RaftLog.lastTerm = snap.Metadata.GetTerm()
+	r.Prs = map[uint64]*Progress{}
+	if confState := snap.Metadata.GetConfState(); confState != nil && len(confState.Nodes) > 0 {
+		for _, v := range confState.Nodes {
+			r.Prs[v] = &Progress{
+				Match: r.RaftLog.LastIndex(),
+				Next:  r.RaftLog.LastIndex() + 1,
+			}
+		}
+	}
+	r.RaftLog.pendingSnapshot = snap
 }
 
 // addNode add a new node to raft group
