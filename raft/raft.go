@@ -134,13 +134,17 @@ type Raft struct {
 
 	// heartbeat interval, should send
 	heartbeatTimeout int
+
 	// baseline of election interval
 	electionTimeout int
+
 	// electionTimeout 是无消息到开始选举的时间，electionRandomTimeout 是自己加的选举超时时间，在 [electionTimeout, 2 * electionTimeout) 之间
 	electionRandomTimeout int
+
 	// number of ticks since it reached last heartbeatTimeout.
 	// only leader keeps heartbeatElapsed.
 	heartbeatElapsed int
+
 	// number of ticks since it reached last electionTimeout
 	electionElapsed int
 
@@ -187,7 +191,6 @@ func newRaft(c *Config) *Raft {
 		c.peers = confState.Nodes
 	}
 	for _, v := range c.peers {
-		//log.Printf("Initial: %d has peer %d\n", r.id, v)
 		r.Prs[v] = &Progress{
 			Match: 0,
 			Next:  1,
@@ -207,9 +210,8 @@ func (r *Raft) sendAppend(to uint64) bool {
 		r.sendSnapshot(to)
 		return false
 	}
-	//log.Printf("%d send append to %d, its next is %d\n", r.id, to, r.Prs[to].Next)
+	// fixme: 这儿感觉不太优雅，甚至可能是错的？
 	entries, index, logTerm := r.RaftLog.unstableEntryPointersFromIndexWithPrevIndexAndTerm(r.Prs[to].Next)
-	//log.Printf("%d send append to %d, logTerm %d, should_index %d\n", r.id, to, index, index+uint64(len(entries)))
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
 		To:      to,
@@ -225,8 +227,10 @@ func (r *Raft) sendAppend(to uint64) bool {
 
 func (r *Raft) sendSnapshot(to uint64) bool {
 	// Your Code Here (2A).
-	snapshot, _ := r.RaftLog.storage.Snapshot()
-	//log.Printf("%d send snapshot to %d\n", r.id, to)
+	snapshot, err := r.RaftLog.storage.Snapshot()
+	if err != nil {
+		return false // 也许 snapshot 还没准备好
+	}
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType:  pb.MessageType_MsgSnapshot,
 		To:       to,
@@ -254,7 +258,6 @@ func (r *Raft) sendAppendResponse(to uint64, reject bool, term uint64, index uin
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
-	//log.Printf("%d send heartbeat to %d\n", r.id, to)
 	r.msgs = append(r.msgs, pb.Message{
 		To:      to,
 		From:    r.id,
@@ -372,8 +375,6 @@ func (r *Raft) Step(m pb.Message) error {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
-	//log.Printf("%d get append from %d\n", r.id, m.GetFrom())
-
 	fromTerm := m.GetTerm()
 	if fromTerm > r.Term {
 		r.becomeFollower(fromTerm, m.GetFrom())
@@ -393,7 +394,6 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	findTerm, _ := r.RaftLog.Term(prevLogIndex)
 	if findTerm != prevLogTerm {
 		reject = true
-
 		r.sendAppendResponse(m.GetFrom(), reject, r.Term, r.RaftLog.LastIndex())
 		return
 	}
@@ -635,9 +635,8 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 }
 
 // handleHeartbeat handle Heartbeat RPC request
-func (r *Raft) handleHeartbeat(m pb.Message) { // fixme: TestHeartbeatUpdateCommit2AB 到底是更新还是不更新？？看看和hzr聊天记录！！！！！
+func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
-	//log.Printf("%d received heartbeat from %d\n", r.id, m.GetFrom())
 	if m.From != r.id { // 不处理自己给自己发消息
 		r.electionElapsed = 0
 		var fromTerm = m.GetTerm()
@@ -658,7 +657,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) { // fixme: TestHeartbeatUpdateComm
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
-	//log.Println("Handle Snapshot")
+	// fixme: 要不要判断 leader？以及想想 r.Prs 的处理
 	if m.From != r.id { // 不处理自己给自己发消息
 		r.electionElapsed = 0
 		var fromTerm = m.GetTerm()
@@ -673,8 +672,6 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	if snap.Metadata.GetIndex() < r.RaftLog.committed {
 		return // fixme: 忽略这个 snapshot，但是这里真的是 committed 吗？
 	}
-	//r.RaftLog.SetLastIndex(snap.Metadata.GetIndex())
-	//r.RaftLog.lastTerm = snap.Metadata.GetTerm()
 	r.Prs = map[uint64]*Progress{}
 	if confState := snap.Metadata.GetConfState(); confState != nil && len(confState.Nodes) > 0 {
 		for _, v := range confState.Nodes {

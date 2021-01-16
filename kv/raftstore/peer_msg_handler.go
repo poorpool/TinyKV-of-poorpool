@@ -56,19 +56,14 @@ func (d *peerMsgHandler) applyAdminRequest(kvWB *engine_util.WriteBatch, entry p
 	msg.Unmarshal(entry.GetData())
 	switch msg.CmdType {
 	case raft_cmdpb.AdminCmdType_CompactLog:
-		//log.Info("ask for compact log")
-		//log.Info(msg.CompactLog)
 		compactLog := msg.GetCompactLog()
 		index, term := compactLog.GetCompactIndex(), compactLog.GetCompactTerm()
 		applyState := d.peerStorage.applyState
 		if applyState.TruncatedState.GetIndex() <= index {
-			//log.Info("will shedule compact log")
 			applyState.TruncatedState.Index = index
 			applyState.TruncatedState.Term = term
 			kvWB.SetMeta(meta.ApplyStateKey(d.regionId), applyState)
-			//kvWB.WriteToDB(d.peerStorage.Engines.Kv)
-			//kvWB = new(engine_util.WriteBatch)
-			d.ScheduleCompactLog(d.RaftGroup.Raft.RaftLog.FirstIndex(), index) // 好像 ScheduleCompactLog 里头没有用到 first，，，
+			d.ScheduleCompactLog(d.RaftGroup.Raft.RaftLog.FirstIndex(), index)
 		}
 	default:
 	}
@@ -81,8 +76,6 @@ func (d *peerMsgHandler) applyAndResponseEntry(kvWB *engine_util.WriteBatch, ent
 	if err != nil {
 		return d.applyAdminRequest(kvWB, entry)
 	}
-	//log.Info("Touch applyAndResponseEntry")
-	//log.Info(msg)
 	switch msg.CmdType {
 	case raft_cmdpb.CmdType_Get:
 		// 立刻写入
@@ -175,13 +168,7 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		return
 	}
 	rd := d.RaftGroup.Ready()
-	//log.Info("HandleRaftReady")
-	//log.Info(rd.Entries)
-	//log.Info(rd.CommittedEntries)
-	//val, _ := engine_util.GetCF(d.peerStorage.Engines.Kv, engine_util.CfDefault, []byte("0 00000000"))
 
-	//log.Info("before, ", val)
-	//log.Info(rd.Snapshot)
 	d.peerStorage.SaveReadyState(&rd)
 	d.Send(d.ctx.trans, rd.Messages) // 发送消息
 
@@ -197,10 +184,6 @@ func (d *peerMsgHandler) HandleRaftReady() {
 		kvWB.WriteToDB(d.peerStorage.Engines.Kv)
 	}
 	d.RaftGroup.Advance(rd)
-
-	//val, _ = engine_util.GetCF(d.peerStorage.Engines.Kv, engine_util.CfDefault, []byte("0 00000000"))
-
-	//log.Info("after, ", val)
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -297,12 +280,7 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	if err != nil {
 		cb.Done(ErrResp(err))
 		return
-	} /* 不需要回调
-	d.proposals = append(d.proposals, &proposal{
-		index: d.nextProposalIndex(),
-		term:  d.Term(),
-		cb:    cb,
-	})*/
+	}
 	err = d.RaftGroup.Propose(data)
 	if err != nil {
 		cb.Done(ErrResp(err))

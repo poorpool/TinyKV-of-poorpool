@@ -167,6 +167,8 @@ func (rn *RawNode) Ready() Ready {
 	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
 		rd.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
 	}
+	rn.Raft.msgs = []pb.Message{} // 清空消息
+	rn.Raft.RaftLog.pendingSnapshot = nil
 	return rd
 }
 
@@ -204,8 +206,6 @@ func (rn *RawNode) Advance(rd Ready) {
 	if len(rd.CommittedEntries) > 0 {
 		rn.Raft.RaftLog.applied = rd.CommittedEntries[len(rd.CommittedEntries)-1].GetIndex()
 	}
-	rn.Raft.msgs = []pb.Message{} // 清空消息
-	rn.Raft.RaftLog.pendingSnapshot = nil
 }
 
 // GetProgress return the the Progress of this node and its peers, if this

@@ -344,7 +344,6 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	ps.clearMeta(kvWB, raftWB)
 	ps.clearExtraData(snapData.GetRegion()) // 先删后设
 
-	log.Info("applyingsnapshot")
 	ps.raftState.LastIndex = snapshot.Metadata.GetIndex()
 	ps.raftState.LastTerm = snapshot.Metadata.GetTerm()
 
@@ -354,24 +353,21 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	kvWB.SetMeta(meta.ApplyStateKey(ps.region.GetId()), ps.applyState)
 
 	notifier := make(chan bool, 1)
-	ps.regionSched <- runner.RegionTaskApply{
+	ps.regionSched <- &runner.RegionTaskApply{
 		RegionId: snapData.GetRegion().GetId(),
 		Notifier: notifier,
 		SnapMeta: snapshot.GetMetadata(),
 		StartKey: snapData.GetRegion().GetStartKey(),
 		EndKey:   snapData.GetRegion().GetEndKey(),
 	}
-	log.Info("applying middle snapshot")
+	<-notifier // ?
 	prevRegion := ps.region
 
 	ps.SetRegion(snapData.GetRegion())
 
 	ps.snapState.StateType = snap.SnapState_Applying
-	log.Info("applying middle2 snapshot")
 	meta.WriteRegionState(kvWB, ps.region, rspb.PeerState_Normal)
 
-	<-notifier // ?
-	log.Info("applied snapshot")
 	return &ApplySnapResult{
 		PrevRegion: prevRegion,
 		Region:     ps.region,

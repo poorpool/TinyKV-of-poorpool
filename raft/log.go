@@ -54,9 +54,6 @@ type RaftLog struct {
 
 	// Your Data Here (2A).
 	firstIndex uint64
-	// fixme: 用pendingSnapshot里的？
-	// lastIndex uint64  最后一个元素的 index
-	// lastTerm  uint64 // 最后一个元素的 term
 }
 
 // newLog returns log using the given storage. It recovers the log
@@ -80,8 +77,8 @@ func newLog(storage Storage) *RaftLog {
 		storage:    storage,
 		firstIndex: fi,
 		applied:    fi - 1,
-		//committed: fi - 1, // fixme: 是吗？
-		stabled: ls,
+		committed:  fi - 1, // fixme: 是吗？
+		stabled:    ls,
 	}
 	return l
 }
@@ -210,14 +207,6 @@ func (l *RaftLog) DeleteFromIndex(index uint64) {
 	l.applied = min(l.applied, lastIndex)
 	l.stabled = min(l.stabled, lastIndex)
 }
-
-/*
-func (l *RaftLog) SetLastIndex(index uint64) {
-	l.lastIndex = index
-	l.committed = min(l.committed, l.lastIndex)
-	l.applied = min(l.applied, l.lastIndex)
-	l.stabled = min(l.stabled, l.lastIndex)
-}*/
 
 func (l *RaftLog) SetFirstIndex(index uint64) {
 	l.firstIndex = index

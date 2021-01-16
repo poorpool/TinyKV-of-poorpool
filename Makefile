@@ -76,6 +76,9 @@ project2b1:
 project2c:
 	$(GOTEST) ./raft ./kv/test_raftstore -run 2C
 
+project2c1:
+	$(GOTEST) ./raft ./kv/test_raftstore -run ConcurrentPartition2C
+
 project3: project3a project3b project3c
 
 project3a:
