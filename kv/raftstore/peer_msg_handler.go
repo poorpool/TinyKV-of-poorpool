@@ -5,7 +5,6 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
-	"github.com/pingcap-incubator/tinykv/raft"
 	"time"
 
 	"github.com/Connor1996/badger/y"
@@ -57,17 +56,18 @@ func (d *peerMsgHandler) applyAdminRequest(kvWB *engine_util.WriteBatch, entry p
 	msg.Unmarshal(entry.GetData())
 	switch msg.CmdType {
 	case raft_cmdpb.AdminCmdType_CompactLog:
-		log.Info("ask for compact log")
-		log.Info(msg.CompactLog)
+		//log.Info("ask for compact log")
+		//log.Info(msg.CompactLog)
 		compactLog := msg.GetCompactLog()
 		index, term := compactLog.GetCompactIndex(), compactLog.GetCompactTerm()
 		applyState := d.peerStorage.applyState
 		if applyState.TruncatedState.GetIndex() <= index {
+			//log.Info("will shedule compact log")
 			applyState.TruncatedState.Index = index
 			applyState.TruncatedState.Term = term
 			kvWB.SetMeta(meta.ApplyStateKey(d.regionId), applyState)
-			kvWB.WriteToDB(d.peerStorage.Engines.Kv)
-			kvWB = new(engine_util.WriteBatch)
+			//kvWB.WriteToDB(d.peerStorage.Engines.Kv)
+			//kvWB = new(engine_util.WriteBatch)
 			d.ScheduleCompactLog(d.RaftGroup.Raft.RaftLog.FirstIndex(), index) // 好像 ScheduleCompactLog 里头没有用到 first，，，
 		}
 	default:
@@ -182,9 +182,6 @@ func (d *peerMsgHandler) HandleRaftReady() {
 
 	//log.Info("before, ", val)
 	//log.Info(rd.Snapshot)
-	if !raft.IsEmptySnap(&rd.Snapshot) {
-		log.Info("OHHHHHH not empty snapshot")
-	}
 	d.peerStorage.SaveReadyState(&rd)
 	d.Send(d.ctx.trans, rd.Messages) // 发送消息
 
@@ -300,12 +297,12 @@ func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *
 	if err != nil {
 		cb.Done(ErrResp(err))
 		return
-	}
+	} /* 不需要回调
 	d.proposals = append(d.proposals, &proposal{
 		index: d.nextProposalIndex(),
 		term:  d.Term(),
 		cb:    cb,
-	})
+	})*/
 	err = d.RaftGroup.Propose(data)
 	if err != nil {
 		cb.Done(ErrResp(err))

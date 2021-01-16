@@ -340,7 +340,42 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
 	// Your Code Here (2C).
-	return nil, nil
+
+	ps.clearMeta(kvWB, raftWB)
+	ps.clearExtraData(snapData.GetRegion()) // 先删后设
+
+	log.Info("applyingsnapshot")
+	ps.raftState.LastIndex = snapshot.Metadata.GetIndex()
+	ps.raftState.LastTerm = snapshot.Metadata.GetTerm()
+
+	ps.applyState.AppliedIndex = snapshot.Metadata.GetIndex()
+	ps.applyState.TruncatedState.Term = snapshot.Metadata.GetTerm()
+	ps.applyState.TruncatedState.Index = snapshot.Metadata.GetIndex()
+	kvWB.SetMeta(meta.ApplyStateKey(ps.region.GetId()), ps.applyState)
+
+	notifier := make(chan bool, 1)
+	ps.regionSched <- runner.RegionTaskApply{
+		RegionId: snapData.GetRegion().GetId(),
+		Notifier: notifier,
+		SnapMeta: snapshot.GetMetadata(),
+		StartKey: snapData.GetRegion().GetStartKey(),
+		EndKey:   snapData.GetRegion().GetEndKey(),
+	}
+	log.Info("applying middle snapshot")
+	prevRegion := ps.region
+
+	ps.SetRegion(snapData.GetRegion())
+
+	ps.snapState.StateType = snap.SnapState_Applying
+	log.Info("applying middle2 snapshot")
+	meta.WriteRegionState(kvWB, ps.region, rspb.PeerState_Normal)
+
+	<-notifier // ?
+	log.Info("applied snapshot")
+	return &ApplySnapResult{
+		PrevRegion: prevRegion,
+		Region:     ps.region,
+	}, nil
 }
 
 // Save memory states to disk.
@@ -350,12 +385,18 @@ func (ps *PeerStorage) SaveReadyState(ready *raft.Ready) (*ApplySnapResult, erro
 	// Your Code Here (2B/2C).
 	raftWB := new(engine_util.WriteBatch)
 	ps.Append(ready.Entries, raftWB)
+	var applySnapResult *ApplySnapResult
+	if !raft.IsEmptySnap(&ready.Snapshot) {
+		kvWB := new(engine_util.WriteBatch)
+		applySnapResult, _ = ps.ApplySnapshot(&ready.Snapshot, kvWB, raftWB)
+		kvWB.WriteToDB(ps.Engines.Kv)
+	}
 	if !raft.IsEmptyHardState(ready.HardState) {
 		ps.raftState.HardState = &ready.HardState
 	}
 	raftWB.SetMeta(meta.RaftStateKey(ps.region.Id), ps.raftState) // 更新 RaftLocalState
 	raftWB.WriteToDB(ps.Engines.Raft)
-	return nil, nil
+	return applySnapResult, nil
 }
 
 func (ps *PeerStorage) ClearData() {

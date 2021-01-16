@@ -484,6 +484,7 @@ func TestOneSnapshot2C(t *testing.T) {
 	cluster.MustDeleteCF(cf, []byte("k2"))
 	time.Sleep(500 * time.Millisecond)
 	MustGetCfNone(cluster.engines[1], cf, []byte("k100"))
+
 	cluster.ClearFilters()
 
 	// Now snapshot must applied on

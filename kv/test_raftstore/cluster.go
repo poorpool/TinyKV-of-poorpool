@@ -306,7 +306,6 @@ func (c *Cluster) MustPutCF(cf string, key, value []byte) {
 		panic("len(resp.Responses) != 1")
 	}
 	if resp.Responses[0].CmdType != raft_cmdpb.CmdType_Put {
-		log.Info("poorpool: CmdType", resp.Responses[0].CmdType)
 		panic("resp.Responses[0].CmdType != raft_cmdpb.CmdType_Put")
 	}
 }

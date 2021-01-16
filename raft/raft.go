@@ -201,7 +201,15 @@ func newRaft(c *Config) *Raft {
 // current commit index to the given peer. Returns true if a message was sent.
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
+	prevIndex := r.Prs[to].Next - 1
+	_, err := r.RaftLog.Term(prevIndex)
+	if err != nil {
+		r.sendSnapshot(to)
+		return false
+	}
+	//log.Printf("%d send append to %d, its next is %d\n", r.id, to, r.Prs[to].Next)
 	entries, index, logTerm := r.RaftLog.unstableEntryPointersFromIndexWithPrevIndexAndTerm(r.Prs[to].Next)
+	//log.Printf("%d send append to %d, logTerm %d, should_index %d\n", r.id, to, index, index+uint64(len(entries)))
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
 		To:      to,
@@ -217,12 +225,28 @@ func (r *Raft) sendAppend(to uint64) bool {
 
 func (r *Raft) sendSnapshot(to uint64) bool {
 	// Your Code Here (2A).
+	snapshot, _ := r.RaftLog.storage.Snapshot()
+	//log.Printf("%d send snapshot to %d\n", r.id, to)
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType:  pb.MessageType_MsgSnapshot,
 		To:       to,
 		From:     r.id,
 		Term:     r.Term,
-		Snapshot: r.RaftLog.pendingSnapshot,
+		Snapshot: &snapshot,
+	})
+	r.Prs[to].Next = snapshot.GetMetadata().GetIndex() + 1
+	return true
+}
+
+func (r *Raft) sendAppendResponse(to uint64, reject bool, term uint64, index uint64) bool {
+	// Your Code Here (2A).
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgAppendResponse,
+		To:      to,
+		From:    r.id,
+		Term:    term,
+		Reject:  reject,
+		Index:   index,
 	})
 	return true
 }
@@ -230,6 +254,7 @@ func (r *Raft) sendSnapshot(to uint64) bool {
 // sendHeartbeat sends a heartbeat RPC to the given peer.
 func (r *Raft) sendHeartbeat(to uint64) {
 	// Your Code Here (2A).
+	//log.Printf("%d send heartbeat to %d\n", r.id, to)
 	r.msgs = append(r.msgs, pb.Message{
 		To:      to,
 		From:    r.id,
@@ -298,9 +323,9 @@ func (r *Raft) becomeLeader() {
 			Next:  r.RaftLog.LastIndex() + 1, // raft 论文
 		}
 	}
-	r.RaftLog.AppendEntries([]*pb.Entry{
-		{},
-	}, r.Term)
+	r.RaftLog.AppendEntriesWithTheirOwnTermAndIndex([]*pb.Entry{
+		{Index: r.RaftLog.LastIndex() + 1, Term: r.Term},
+	})
 	if 1 > len(r.Prs)/2 {
 		r.RaftLog.committed = r.RaftLog.LastIndex()
 	}
@@ -338,6 +363,8 @@ func (r *Raft) Step(m pb.Message) error {
 		r.handleHeartbeat(m)
 	case pb.MessageType_MsgSnapshot:
 		r.handleSnapshot(m)
+	case pb.MessageType_MsgHeartbeatResponse:
+		r.sendAppend(m.GetFrom())
 	}
 	return nil
 }
@@ -345,6 +372,7 @@ func (r *Raft) Step(m pb.Message) error {
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+	//log.Printf("%d get append from %d\n", r.id, m.GetFrom())
 
 	fromTerm := m.GetTerm()
 	if fromTerm > r.Term {
@@ -353,15 +381,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	reject := false
 	r.electionElapsed = 0
 	if fromTerm > 0 && fromTerm < r.Term {
-		reject = true
-		r.msgs = append(r.msgs, pb.Message{
-			MsgType: pb.MessageType_MsgAppendResponse,
-			To:      m.GetFrom(),
-			From:    r.id,
-			Term:    r.Term,
-			Reject:  reject,
-			Index:   r.RaftLog.LastIndex(),
-		})
+		r.sendAppendResponse(m.GetFrom(), true, r.Term, r.RaftLog.LastIndex())
 		return
 	}
 	r.Lead = m.GetFrom()
@@ -373,36 +393,31 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	findTerm, _ := r.RaftLog.Term(prevLogIndex)
 	if findTerm != prevLogTerm {
 		reject = true
+
+		r.sendAppendResponse(m.GetFrom(), reject, r.Term, r.RaftLog.LastIndex())
+		return
 	}
 	if !reject {
-		var willAppendEntries []*pb.Entry
 		for i, v := range m.GetEntries() {
-			findTerm, _ := r.RaftLog.Term(v.GetIndex())
-			if findTerm != 0 && findTerm != v.GetTerm() {
-				r.RaftLog.DeleteFromIndex(v.GetIndex())
-				willAppendEntries = m.GetEntries()[i:]
-				break
-			}
-			if findTerm == 0 {
-				willAppendEntries = m.GetEntries()[i:]
+			if v.GetIndex() < r.RaftLog.FirstIndex() {
+				continue
+			} else if v.GetIndex() <= r.RaftLog.LastIndex() { // 可能要删
+				findTerm, _ := r.RaftLog.Term(v.GetIndex())
+				if findTerm != v.GetTerm() {
+					r.RaftLog.DeleteFromIndex(v.GetIndex())
+					r.RaftLog.entries = append(r.RaftLog.entries, *v)
+					r.RaftLog.stabled = min(r.RaftLog.stabled, v.GetIndex()-1)
+				}
+			} else {
+				r.RaftLog.AppendEntriesWithTheirOwnTermAndIndex(m.Entries[i:])
 				break
 			}
 		}
-		r.RaftLog.AppendEntriesWithTheirOwnTerm(willAppendEntries)
-		if len(m.GetEntries()) > 0 {
-			r.RaftLog.committed = min(m.GetCommit(), m.GetEntries()[len(m.GetEntries())-1].GetIndex()) // fixme: to pass raft_test556
-		} else {
-			r.RaftLog.committed = min(m.GetCommit(), m.GetIndex())
+		if m.GetCommit() > r.RaftLog.committed {
+			r.RaftLog.committed = min(m.GetCommit(), m.GetIndex()+uint64(len(m.GetEntries())))
 		}
 	}
-	r.msgs = append(r.msgs, pb.Message{
-		MsgType: pb.MessageType_MsgAppendResponse,
-		To:      m.GetFrom(),
-		From:    r.id,
-		Term:    r.Term,
-		Reject:  reject,
-		Index:   r.RaftLog.LastIndex(),
-	})
+	r.sendAppendResponse(m.GetFrom(), reject, r.Term, r.RaftLog.LastIndex())
 }
 
 // handlePropose handle Propose RPC request
@@ -425,22 +440,19 @@ func (r *Raft) handlePropose(m pb.Message) {
 
 	entries := m.GetEntries()
 	r.RaftLog.AppendEntries(entries, r.Term)
-	for k, v := range r.Prs {
+	for k := range r.Prs {
 		if k == r.id {
 			continue
 		}
-		if r.RaftLog.pendingSnapshot != nil && r.RaftLog.pendingSnapshot.Metadata.Index > v.Next {
-			r.sendSnapshot(k)
-		} else {
-			r.sendAppend(k)
-		}
+		r.sendAppend(k)
 	}
+	lastIndex := r.RaftLog.LastIndex()
 	r.Prs[r.id] = &Progress{
-		Match: r.RaftLog.lastIndex,
-		Next:  r.RaftLog.lastIndex + 1,
+		Match: lastIndex,
+		Next:  lastIndex + 1,
 	}
 	if len(r.Prs) == 1 {
-		r.RaftLog.committed = r.RaftLog.lastIndex
+		r.RaftLog.committed = lastIndex
 	}
 }
 
@@ -600,7 +612,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 	r.Prs[m.GetFrom()].Next = m.GetIndex() + 1
 	r.Prs[m.GetFrom()].Match = m.GetIndex()
 	var changed = false
-	for i := r.RaftLog.committed + 1; i <= r.RaftLog.lastIndex; i++ {
+	for i := r.RaftLog.committed + 1; i <= r.RaftLog.LastIndex(); i++ {
 		cnt := 0
 		for k, v := range r.Prs {
 			if k != r.id && v.Match >= i {
@@ -625,6 +637,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 // handleHeartbeat handle Heartbeat RPC request
 func (r *Raft) handleHeartbeat(m pb.Message) { // fixme: TestHeartbeatUpdateCommit2AB 到底是更新还是不更新？？看看和hzr聊天记录！！！！！
 	// Your Code Here (2A).
+	//log.Printf("%d received heartbeat from %d\n", r.id, m.GetFrom())
 	if m.From != r.id { // 不处理自己给自己发消息
 		r.electionElapsed = 0
 		var fromTerm = m.GetTerm()
@@ -634,11 +647,18 @@ func (r *Raft) handleHeartbeat(m pb.Message) { // fixme: TestHeartbeatUpdateComm
 			return // 过期了
 		}
 	}
+	r.msgs = append(r.msgs, pb.Message{
+		MsgType: pb.MessageType_MsgHeartbeatResponse,
+		To:      m.GetFrom(),
+		From:    r.id,
+		Term:    r.Term,
+	})
 }
 
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	//log.Println("Handle Snapshot")
 	if m.From != r.id { // 不处理自己给自己发消息
 		r.electionElapsed = 0
 		var fromTerm = m.GetTerm()
@@ -653,14 +673,14 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	if snap.Metadata.GetIndex() < r.RaftLog.committed {
 		return // fixme: 忽略这个 snapshot，但是这里真的是 committed 吗？
 	}
-	r.RaftLog.SetLastIndex(snap.Metadata.GetIndex())
-	r.RaftLog.lastTerm = snap.Metadata.GetTerm()
+	//r.RaftLog.SetLastIndex(snap.Metadata.GetIndex())
+	//r.RaftLog.lastTerm = snap.Metadata.GetTerm()
 	r.Prs = map[uint64]*Progress{}
 	if confState := snap.Metadata.GetConfState(); confState != nil && len(confState.Nodes) > 0 {
 		for _, v := range confState.Nodes {
 			r.Prs[v] = &Progress{
-				Match: r.RaftLog.LastIndex(),
-				Next:  r.RaftLog.LastIndex() + 1,
+				//Match: r.RaftLog.LastIndex(),
+				//Next:  r.RaftLog.LastIndex() + 1,
 			}
 		}
 	}
