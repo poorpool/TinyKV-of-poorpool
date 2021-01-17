@@ -110,9 +110,8 @@ func (l *RaftLog) unstableEntries() []pb.Entry {
 	return []pb.Entry{}
 }
 
-func (l *RaftLog) unstableEntryPointersFromIndexWithPrevIndexAndTerm(i uint64) ([]*pb.Entry, uint64, uint64) {
+func (l *RaftLog) unstableEntryPointersFromIndex(i uint64) []*pb.Entry {
 	var entries []*pb.Entry
-	var index, logTerm uint64
 	for _, v := range l.entries {
 		if v.GetIndex() >= i {
 			entries = append(entries, &pb.Entry{
@@ -120,12 +119,9 @@ func (l *RaftLog) unstableEntryPointersFromIndexWithPrevIndexAndTerm(i uint64) (
 				Index: v.GetIndex(),
 				Data:  v.GetData(),
 			})
-		} else {
-			index = v.GetIndex()
-			logTerm = v.GetTerm()
 		}
 	}
-	return entries, index, logTerm
+	return entries
 }
 
 // nextEnts returns all the committed but not applied entries

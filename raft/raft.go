@@ -17,6 +17,7 @@ package raft
 import (
 	"errors"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+	"log"
 	"math/rand"
 	"time"
 )
@@ -205,20 +206,20 @@ func newRaft(c *Config) *Raft {
 func (r *Raft) sendAppend(to uint64) bool {
 	// Your Code Here (2A).
 	prevIndex := r.Prs[to].Next - 1
-	_, err := r.RaftLog.Term(prevIndex)
+	prevTerm, err := r.RaftLog.Term(prevIndex)
 	if err != nil {
 		r.sendSnapshot(to)
 		return false
 	}
 	// fixme: 这儿感觉不太优雅，甚至可能是错的？
-	entries, index, logTerm := r.RaftLog.unstableEntryPointersFromIndexWithPrevIndexAndTerm(r.Prs[to].Next)
+	entries := r.RaftLog.unstableEntryPointersFromIndex(r.Prs[to].Next)
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
 		To:      to,
 		From:    r.id,
 		Term:    r.Term,
-		LogTerm: logTerm, // 要发送的entries前一个term
-		Index:   index,   // 要发送的entries前一个index
+		LogTerm: prevTerm,  // 要发送的entries前一个term
+		Index:   prevIndex, // 要发送的entries前一个index
 		Entries: entries,
 		Commit:  r.RaftLog.committed,
 	})
@@ -242,7 +243,7 @@ func (r *Raft) sendSnapshot(to uint64) bool {
 	return true
 }
 
-func (r *Raft) sendAppendResponse(to uint64, reject bool, term uint64, index uint64) bool {
+func (r *Raft) sendAppendResponse(to uint64, reject bool, term uint64, index uint64) bool { // fixme: 事实上，这个 index 没有必要
 	// Your Code Here (2A).
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgAppendResponse,
@@ -347,6 +348,10 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
+
+	//log.Printf("%d 's First %d, apply %d, commit %d, stable %d, lastindex %d\n", r.id, r.RaftLog.FirstIndex(),
+	//	r.RaftLog.applied, r.RaftLog.committed, r.RaftLog.stabled, r.RaftLog.LastIndex())
+	//log.Print(m.GetMsgType())
 	switch m.GetMsgType() { // todo: 在这儿使用反射
 	case pb.MessageType_MsgRequestVote:
 		r.handleRequestVote(m) // todo: 理清 heartbeat 和 append 的关系
@@ -369,6 +374,12 @@ func (r *Raft) Step(m pb.Message) error {
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.sendAppend(m.GetFrom())
 	}
+	//log.Printf("%d 's First %d, apply %d, commit %d, stable %d, lastindex %d\n", r.id, r.RaftLog.FirstIndex(),
+	//	r.RaftLog.applied, r.RaftLog.committed, r.RaftLog.stabled, r.RaftLog.LastIndex())
+
+	if r.RaftLog.applied > r.RaftLog.committed {
+		panic("poorpool: applied > committed")
+	}
 	return nil
 }
 
@@ -389,10 +400,10 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	if fromTerm >= r.Term && r.State == StateCandidate {
 		r.becomeFollower(m.Term, m.GetFrom())
 	}
-
+	//log.Printf("%d send: prevIndex %d, len %d, committed %d\n", m.GetFrom(),  m.GetIndex(), len(m.GetEntries()), m.GetCommit())
 	prevLogIndex, prevLogTerm := m.GetIndex(), m.GetLogTerm()
-	findTerm, _ := r.RaftLog.Term(prevLogIndex)
-	if findTerm != prevLogTerm {
+	findTerm, err := r.RaftLog.Term(prevLogIndex)
+	if err != nil && findTerm != prevLogTerm { // 找得到，不匹配
 		reject = true
 		r.sendAppendResponse(m.GetFrom(), reject, r.Term, r.RaftLog.LastIndex())
 		return
@@ -609,6 +620,9 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 		r.sendAppend(m.GetFrom())
 		return
 	}
+	if m.GetIndex() <= r.Prs[m.GetFrom()].Match {
+		return
+	}
 	r.Prs[m.GetFrom()].Next = m.GetIndex() + 1
 	r.Prs[m.GetFrom()].Match = m.GetIndex()
 	var changed = false
@@ -658,6 +672,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
 	// fixme: 要不要判断 leader？以及想想 r.Prs 的处理
+	log.Print("handle snapshot")
 	if m.From != r.id { // 不处理自己给自己发消息
 		r.electionElapsed = 0
 		var fromTerm = m.GetTerm()
@@ -669,9 +684,15 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	}
 
 	snap := m.GetSnapshot()
-	if snap.Metadata.GetIndex() < r.RaftLog.committed {
-		return // fixme: 忽略这个 snapshot，但是这里真的是 committed 吗？
+	if snap.Metadata.GetIndex() <= r.RaftLog.committed {
+		r.sendAppendResponse(m.GetFrom(), true, r.Term, r.RaftLog.committed)
+		return
 	}
+	r.RaftLog.entries = []pb.Entry{}
+	r.RaftLog.SetFirstIndex(snap.GetMetadata().GetIndex() + 1)
+	r.RaftLog.applied = snap.GetMetadata().GetIndex()
+	r.RaftLog.committed = snap.GetMetadata().GetIndex()
+	r.RaftLog.stabled = snap.GetMetadata().GetIndex()
 	r.Prs = map[uint64]*Progress{}
 	if confState := snap.Metadata.GetConfState(); confState != nil && len(confState.Nodes) > 0 {
 		for _, v := range confState.Nodes {
@@ -682,6 +703,7 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 		}
 	}
 	r.RaftLog.pendingSnapshot = snap
+	r.sendAppendResponse(m.GetFrom(), false, r.Term, r.RaftLog.LastIndex()) // 考虑一下是 lastindex吗
 }
 
 // addNode add a new node to raft group
