@@ -17,7 +17,6 @@ package raft
 import (
 	"errors"
 	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
-	"log"
 	"math/rand"
 	"time"
 )
@@ -374,9 +373,11 @@ func (r *Raft) Step(m pb.Message) error {
 	case pb.MessageType_MsgHeartbeatResponse:
 		r.sendAppend(m.GetFrom())
 	}
-	//log.Printf("%d 's First %d, apply %d, commit %d, stable %d, lastindex %d\n", r.id, r.RaftLog.FirstIndex(),
-	//	r.RaftLog.applied, r.RaftLog.committed, r.RaftLog.stabled, r.RaftLog.LastIndex())
-
+	//log.Printf("%d 's First %d, apply %d, commit %d, stable %d, entries len %d, lastindex %d\n", r.id, r.RaftLog.FirstIndex(),
+	//	r.RaftLog.applied, r.RaftLog.committed, r.RaftLog.stabled, len(r.RaftLog.entries), r.RaftLog.LastIndex())
+	if r.RaftLog.stabled-r.RaftLog.FirstIndex()+1 > uint64(len(r.RaftLog.entries)) {
+		panic("poorpool: yuejie")
+	}
 	if r.RaftLog.applied > r.RaftLog.committed {
 		panic("poorpool: applied > committed")
 	}
@@ -400,10 +401,14 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 	if fromTerm >= r.Term && r.State == StateCandidate {
 		r.becomeFollower(m.Term, m.GetFrom())
 	}
+	if m.Index > r.RaftLog.LastIndex() {
+		r.sendAppendResponse(m.From, true, r.Term, 1)
+		return
+	}
 	//log.Printf("%d send: prevIndex %d, len %d, committed %d\n", m.GetFrom(),  m.GetIndex(), len(m.GetEntries()), m.GetCommit())
 	prevLogIndex, prevLogTerm := m.GetIndex(), m.GetLogTerm()
-	findTerm, err := r.RaftLog.Term(prevLogIndex)
-	if err != nil && findTerm != prevLogTerm { // 找得到，不匹配
+	findTerm, _ := r.RaftLog.Term(prevLogIndex)
+	if prevLogIndex >= r.RaftLog.FirstIndex() && findTerm != prevLogTerm { // 不匹配
 		reject = true
 		r.sendAppendResponse(m.GetFrom(), reject, r.Term, r.RaftLog.LastIndex())
 		return
@@ -659,7 +664,11 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 		} else if fromTerm > 0 && fromTerm < r.Term {
 			return // 过期了
 		}
-	}
+	} /*
+		if m.GetTerm() < r.Term {
+			return
+		}
+		r.becomeFollower(m.GetTerm(), m.GetFrom())*/
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgHeartbeatResponse,
 		To:      m.GetFrom(),
@@ -672,8 +681,8 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
 	// fixme: 要不要判断 leader？以及想想 r.Prs 的处理
-	log.Print("handle snapshot")
-	if m.From != r.id { // 不处理自己给自己发消息
+	//log.Print("handle snapshot")
+	/*if m.From != r.id { // 不处理自己给自己发消息
 		r.electionElapsed = 0
 		var fromTerm = m.GetTerm()
 		if fromTerm > r.Term {
@@ -681,13 +690,14 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 		} else if fromTerm > 0 && fromTerm < r.Term {
 			return // 过期了
 		}
-	}
+	}*/
 
 	snap := m.GetSnapshot()
 	if snap.Metadata.GetIndex() <= r.RaftLog.committed {
 		r.sendAppendResponse(m.GetFrom(), true, r.Term, r.RaftLog.committed)
 		return
 	}
+	r.becomeFollower(m.GetTerm(), m.GetFrom())
 	r.RaftLog.entries = []pb.Entry{}
 	r.RaftLog.SetFirstIndex(snap.GetMetadata().GetIndex() + 1)
 	r.RaftLog.applied = snap.GetMetadata().GetIndex()

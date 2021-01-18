@@ -29,3 +29,9 @@ do all read/write operations through `engine_util` provided methods.
 `t := i.(T)` 是类型断言，i 是接口变量，T 为转换的目标类型。`t, ok := i.(T)` 更有好，正常 true,不正常 false。
 
 engines.go 里头有一个将 *WriteBatch 写到 engine 的 kv db 里头的函数。
+
+# project
+
+2b 合测会出现玄学错误，但是分开测不会
+
+2c onesnapshot可能会出错
