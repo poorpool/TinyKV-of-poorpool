@@ -210,7 +210,6 @@ func (r *Raft) sendAppend(to uint64) bool {
 		r.sendSnapshot(to)
 		return false
 	}
-	// fixme: 这儿感觉不太优雅，甚至可能是错的？
 	entries := r.RaftLog.unstableEntryPointersFromIndex(r.Prs[to].Next)
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgAppend,
@@ -242,7 +241,7 @@ func (r *Raft) sendSnapshot(to uint64) bool {
 	return true
 }
 
-func (r *Raft) sendAppendResponse(to uint64, reject bool, term uint64, index uint64) bool { // fixme: 事实上，这个 index 没有必要
+func (r *Raft) sendAppendResponse(to uint64, reject bool, term uint64, index uint64) bool {
 	// Your Code Here (2A).
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgAppendResponse,
@@ -252,6 +251,7 @@ func (r *Raft) sendAppendResponse(to uint64, reject bool, term uint64, index uin
 		Reject:  reject,
 		Index:   index,
 	})
+	// 其实 reject 为 true 的，index 都没有必要
 	return true
 }
 
@@ -349,13 +349,9 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-
-	//log.Printf("%d 's First %d, apply %d, commit %d, stable %d, lastindex %d\n", r.id, r.RaftLog.FirstIndex(),
-	//	r.RaftLog.applied, r.RaftLog.committed, r.RaftLog.stabled, r.RaftLog.LastIndex())
-	//log.Print(m.GetMsgType(), m.GetFrom(), "->", m.GetTo())
-	//log.Print(r.id, "'s state", r.State, ", Term", r.Term)
+	//log.Print(m.GetMsgType(), ", id ", r.id, ", term", r.T ", state ", r.State, ", from ", m.GetFrom(), ", to", m.GetTo())
 	if m.GetTerm() > r.Term {
-		r.becomeFollower(m.GetTerm(), None)
+		r.becomeFollower(m.GetTerm(), None) // 这里一定是 None，参见 notes1.md
 	}
 	switch r.State {
 	case StateFollower:
@@ -424,39 +420,23 @@ func (r *Raft) Step(m pb.Message) error {
 		}
 	}
 
-	//log.Printf("%d 's First %d, apply %d, commit %d, stable %d, entries len %d, lastindex %d\n", r.id, r.RaftLog.FirstIndex(),
-	//	r.RaftLog.applied, r.RaftLog.committed, r.RaftLog.stabled, len(r.RaftLog.entries), r.RaftLog.LastIndex())
-	//if r.RaftLog.stabled-r.RaftLog.FirstIndex()+1 > uint64(len(r.RaftLog.entries)) {
-	//	panic("poorpool: yuejie")
-	//}
-	//if r.RaftLog.applied > r.RaftLog.committed {
-	//	panic("poorpool: applied > committed")
-	//}
 	return nil
 }
 
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
-	fromTerm := m.GetTerm()
-	if fromTerm > r.Term {
-		r.becomeFollower(fromTerm, m.GetFrom())
-	}
 	reject := false
 	r.electionElapsed = 0
-	if fromTerm > 0 && fromTerm < r.Term {
-		r.sendAppendResponse(m.GetFrom(), true, r.Term, r.RaftLog.LastIndex())
+	if m.GetTerm() < r.Term {
+		r.sendAppendResponse(m.GetFrom(), true, r.Term, 0) // 只是为了让这个 leader 下台，index 填 0
 		return
 	}
 	r.Lead = m.GetFrom()
-	if fromTerm >= r.Term && r.State == StateCandidate {
-		r.becomeFollower(m.Term, m.GetFrom())
-	}
 	if m.Index > r.RaftLog.LastIndex() {
-		r.sendAppendResponse(m.From, true, r.Term, 1)
+		r.sendAppendResponse(m.From, true, r.Term, r.RaftLog.LastIndex())
 		return
 	}
-	//log.Printf("%d send: prevIndex %d, len %d, committed %d\n", m.GetFrom(),  m.GetIndex(), len(m.GetEntries()), m.GetCommit())
 	prevLogIndex, prevLogTerm := m.GetIndex(), m.GetLogTerm()
 	findTerm, _ := r.RaftLog.Term(prevLogIndex)
 	if prevLogIndex >= r.RaftLog.FirstIndex() && findTerm != prevLogTerm { // 不匹配
@@ -489,22 +469,6 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 
 // handlePropose handle Propose RPC request
 func (r *Raft) handlePropose(m pb.Message) {
-	if m.From != r.id { // 不处理自己给自己发消息
-		r.electionElapsed = 0
-		var fromTerm = m.GetTerm()
-		if fromTerm > r.Term {
-			if r.State != StateFollower {
-				r.becomeFollower(fromTerm, m.GetFrom())
-			}
-			r.Term = fromTerm
-		} else if fromTerm > 0 && fromTerm < r.Term {
-			return // 过期了
-		}
-	}
-	if r.State != StateLeader {
-		return
-	}
-
 	entries := m.GetEntries()
 	r.RaftLog.AppendEntries(entries, r.Term)
 	for k := range r.Prs {
@@ -525,23 +489,6 @@ func (r *Raft) handlePropose(m pb.Message) {
 
 // handleHup handle Hup request
 func (r *Raft) handleHup(m pb.Message) {
-	if m.From != r.id { // 不处理自己给自己发消息
-		r.electionElapsed = 0
-		var fromTerm = m.GetTerm()
-		if fromTerm > r.Term {
-			if r.State != StateFollower {
-				r.becomeFollower(fromTerm, m.GetFrom())
-			}
-			r.Term = fromTerm
-		} else if fromTerm > 0 && fromTerm < r.Term {
-			return // 过期了
-		}
-	}
-
-	if r.State == StateLeader {
-		return
-	}
-	r.electionElapsed = 0
 	r.becomeCandidate()
 
 	if r.Vote == 0 {
@@ -570,17 +517,18 @@ func (r *Raft) handleHup(m pb.Message) {
 
 // handleRequestVote handle RequestVote RPC request
 func (r *Raft) handleRequestVote(m pb.Message) {
-	if m.From != r.id { // 不处理自己给自己发消息
-		r.electionElapsed = 0
-		var fromTerm = m.GetTerm()
-		if fromTerm > r.Term {
-			r.becomeFollower(fromTerm, 0) // 投票但是不标记为自己领导
-		} else if fromTerm > 0 && fromTerm < r.Term {
-			return // 过期了
-		}
+	r.electionElapsed = 0 // fixme: 这个时间合适吗
+	if m.GetTerm() < r.Term {
+		r.msgs = append(r.msgs, pb.Message{ // 不直接 return，让发起者早点失败
+			MsgType: pb.MessageType_MsgRequestVoteResponse,
+			To:      m.GetFrom(),
+			From:    r.id,
+			Term:    r.Term,
+			Reject:  true,
+		})
 	}
 	willVote := false
-	if r.Term <= m.GetTerm() && (r.Vote == 0 || r.Vote == m.GetFrom()) {
+	if r.Vote == 0 || r.Vote == m.GetFrom() {
 		mindex, mterm := m.GetIndex(), m.GetLogTerm()
 		rindex := r.RaftLog.LastIndex()
 		rterm, _ := r.RaftLog.Term(rindex)
@@ -602,19 +550,8 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 
 // handleRequestVoteResponse handle RequestVoteResponse RPC request
 func (r *Raft) handleRequestVoteResponse(m pb.Message) {
-	if m.From != r.id { // 不处理自己给自己发消息
-		r.electionElapsed = 0
-		var fromTerm = m.GetTerm()
-		if fromTerm > r.Term {
-			if r.State != StateFollower {
-				r.becomeFollower(fromTerm, m.GetFrom())
-			}
-			r.Term = fromTerm
-		} else if fromTerm > 0 && fromTerm < r.Term {
-			return // 过期了
-		}
-	}
-	if r.State != StateCandidate {
+	r.electionElapsed = 0
+	if m.GetTerm() < r.Term {
 		return
 	}
 	r.votes[m.GetFrom()] = !m.GetReject()
@@ -636,40 +573,18 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 
 // handleBeat handle Beat request
 func (r *Raft) handleBeat(m pb.Message) {
-	if m.From != r.id { // 不处理自己给自己发消息
-		r.electionElapsed = 0
-		var fromTerm = m.GetTerm()
-		if fromTerm > r.Term {
-			if r.State != StateFollower {
-				r.becomeFollower(fromTerm, m.GetFrom())
-			}
-			r.Term = fromTerm
-		} else if fromTerm > 0 && fromTerm < r.Term {
-			return // 过期了
-		}
-	}
-	if r.State == StateLeader && m.GetFrom() == r.id {
-		r.heartbeatElapsed = 0
-		for k, _ := range r.Prs {
-			if k != r.id {
-				r.sendHeartbeat(k)
-			}
+	r.heartbeatElapsed = 0
+	for k, _ := range r.Prs {
+		if k != r.id {
+			r.sendHeartbeat(k)
 		}
 	}
 }
 
 func (r *Raft) handleAppendResponse(m pb.Message) {
-	if m.From != r.id { // 不处理自己给自己发消息
-		r.electionElapsed = 0
-		var fromTerm = m.GetTerm()
-		if fromTerm > r.Term {
-			if r.State != StateFollower {
-				r.becomeFollower(fromTerm, m.GetFrom())
-			}
-			r.Term = fromTerm
-		} else if fromTerm > 0 && fromTerm < r.Term {
-			return // 过期了
-		}
+	r.electionElapsed = 0
+	if m.GetTerm() < r.Term {
+		return
 	}
 	if m.GetReject() {
 		r.Prs[m.GetFrom()].Next--
@@ -707,26 +622,10 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 // handleHeartbeat handle Heartbeat RPC request
 func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
-	/*if m.From != r.id { // 不处理自己给自己发消息
-		r.electionElapsed = 0
-		var fromTerm = m.GetTerm()
-		if fromTerm > r.Term {
-			r.becomeFollower(fromTerm, m.GetFrom())
-		} else if fromTerm > 0 && fromTerm < r.Term {
-			return // 过期了
-		}
+	r.electionElapsed = 0
+	if m.GetTerm() >= r.Term { // 小于的时候不要丢弃，要发送回复让任期比自己低的 leader 下台
+		r.Lead = m.GetFrom()
 	}
-		if m.GetTerm() < r.Term {
-			return
-		}
-		r.becomeFollower(m.GetTerm(), m.GetFrom())*/
-	fromTerm := m.GetTerm()
-	if fromTerm > r.Term {
-		r.becomeFollower(fromTerm, m.GetFrom())
-	} else if fromTerm == r.Term && r.State == StateCandidate {
-		r.becomeFollower(fromTerm, m.GetFrom())
-	}
-	r.Lead = m.GetFrom()
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgHeartbeatResponse,
 		To:      m.GetFrom(),
@@ -738,21 +637,10 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
-	// fixme: 要不要判断 leader？以及想想 r.Prs 的处理
-	//log.Print("handle snapshot")
-	/*if m.From != r.id { // 不处理自己给自己发消息
-		r.electionElapsed = 0
-		var fromTerm = m.GetTerm()
-		if fromTerm > r.Term {
-			r.becomeFollower(fromTerm, m.GetFrom())
-		} else if fromTerm > 0 && fromTerm < r.Term {
-			return // 过期了
-		}
-	}*/
-
+	r.electionElapsed = 0
 	snap := m.GetSnapshot()
-	if snap.Metadata.GetIndex() <= r.RaftLog.committed {
-		r.sendAppendResponse(m.GetFrom(), true, r.Term, r.RaftLog.committed)
+	if m.GetTerm() < r.Term && snap.Metadata.GetIndex() <= r.RaftLog.committed {
+		r.sendAppendResponse(m.GetFrom(), true, r.Term, r.RaftLog.LastIndex())
 		return
 	}
 	r.becomeFollower(m.GetTerm(), m.GetFrom())

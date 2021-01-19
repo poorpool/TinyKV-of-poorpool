@@ -158,7 +158,7 @@ func (l *RaftLog) FirstIndex() uint64 {
 // Term return the term of the entry in the given index
 func (l *RaftLog) Term(i uint64) (uint64, error) {
 	// Your Code Here (2A).
-	/*if !IsEmptySnap(l.pendingSnapshot) {
+	if !IsEmptySnap(l.pendingSnapshot) {
 		if i == l.pendingSnapshot.Metadata.GetIndex() {
 			return l.pendingSnapshot.Metadata.GetTerm(), nil
 		}
@@ -168,22 +168,7 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 			return v.Term, nil
 		}
 	}
-	return l.storage.Term(i)*/
-	// fixme: 清真一点
-	if len(l.entries) > 0 && i >= l.FirstIndex() {
-		return l.entries[i-l.FirstIndex()].Term, nil
-	}
-	term, err := l.storage.Term(i)
-
-	if err == ErrUnavailable && !IsEmptySnap(l.pendingSnapshot) {
-		if i == l.pendingSnapshot.Metadata.Index {
-			term = l.pendingSnapshot.Metadata.Term
-			err = nil
-		} else if i < l.pendingSnapshot.Metadata.Index {
-			err = ErrCompacted
-		}
-	}
-	return term, err
+	return l.storage.Term(i)
 }
 
 func (l *RaftLog) AppendEntriesWithTheirOwnTermAndIndex(entries []*pb.Entry) {
