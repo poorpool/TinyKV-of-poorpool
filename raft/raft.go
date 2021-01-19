@@ -309,6 +309,7 @@ func (r *Raft) becomeCandidate() {
 	r.State = StateCandidate
 	r.Term++ // 自增任期号，开始选举
 	r.Vote = 0
+	r.Lead = 0
 	r.votes = map[uint64]bool{}
 	r.electionRandomTimeout = rand.Intn(r.electionTimeout) + r.electionTimeout
 	r.electionElapsed = 0
@@ -320,6 +321,7 @@ func (r *Raft) becomeLeader() {
 	// NOTE: Leader should propose a noop entry on its term
 	r.State = StateLeader
 	r.heartbeatElapsed = 0
+	r.Lead = r.id
 	for k, _ := range r.Prs {
 		r.Prs[k] = &Progress{
 			Match: 0,
@@ -352,28 +354,76 @@ func (r *Raft) Step(m pb.Message) error {
 	//	r.RaftLog.applied, r.RaftLog.committed, r.RaftLog.stabled, r.RaftLog.LastIndex())
 	//log.Print(m.GetMsgType(), m.GetFrom(), "->", m.GetTo())
 	//log.Print(r.id, "'s state", r.State, ", Term", r.Term)
-	switch m.GetMsgType() { // todo: 在这儿使用反射
-	case pb.MessageType_MsgRequestVote:
-		r.handleRequestVote(m) // todo: 理清 heartbeat 和 append 的关系
-	case pb.MessageType_MsgAppend:
-		r.handleAppendEntries(m)
-	case pb.MessageType_MsgPropose:
-		r.handlePropose(m)
-	case pb.MessageType_MsgHup:
-		r.handleHup(m)
-	case pb.MessageType_MsgRequestVoteResponse:
-		r.handleRequestVoteResponse(m)
-	case pb.MessageType_MsgBeat:
-		r.handleBeat(m)
-	case pb.MessageType_MsgAppendResponse:
-		r.handleAppendResponse(m)
-	case pb.MessageType_MsgHeartbeat:
-		r.handleHeartbeat(m)
-	case pb.MessageType_MsgSnapshot:
-		r.handleSnapshot(m)
-	case pb.MessageType_MsgHeartbeatResponse:
-		r.sendAppend(m.GetFrom())
+	if m.GetTerm() > r.Term {
+		r.becomeFollower(m.GetTerm(), None)
 	}
+	switch r.State {
+	case StateFollower:
+		switch m.GetMsgType() {
+		case pb.MessageType_MsgRequestVote:
+			r.handleRequestVote(m)
+		case pb.MessageType_MsgAppend:
+			r.handleAppendEntries(m)
+		case pb.MessageType_MsgPropose:
+		case pb.MessageType_MsgHup:
+			r.handleHup(m)
+		case pb.MessageType_MsgRequestVoteResponse:
+		case pb.MessageType_MsgBeat:
+		case pb.MessageType_MsgAppendResponse:
+		case pb.MessageType_MsgHeartbeat:
+			r.handleHeartbeat(m)
+		case pb.MessageType_MsgSnapshot:
+			r.handleSnapshot(m)
+		case pb.MessageType_MsgHeartbeatResponse:
+		}
+	case StateCandidate:
+		switch m.GetMsgType() {
+		case pb.MessageType_MsgRequestVote:
+			r.handleRequestVote(m)
+		case pb.MessageType_MsgAppend:
+			if m.GetTerm() == r.Term {
+				r.becomeFollower(m.GetTerm(), m.GetFrom())
+			}
+			r.handleAppendEntries(m)
+		case pb.MessageType_MsgPropose:
+		case pb.MessageType_MsgHup:
+			r.handleHup(m)
+		case pb.MessageType_MsgRequestVoteResponse:
+			r.handleRequestVoteResponse(m)
+		case pb.MessageType_MsgBeat:
+		case pb.MessageType_MsgAppendResponse:
+		case pb.MessageType_MsgHeartbeat:
+			if m.GetTerm() == r.Term {
+				r.becomeFollower(m.GetTerm(), m.GetFrom())
+			}
+			r.handleHeartbeat(m)
+		case pb.MessageType_MsgSnapshot:
+			r.handleSnapshot(m)
+		case pb.MessageType_MsgHeartbeatResponse:
+		}
+	case StateLeader:
+		switch m.GetMsgType() {
+		case pb.MessageType_MsgRequestVote:
+			r.handleRequestVote(m)
+		case pb.MessageType_MsgAppend:
+			r.handleAppendEntries(m)
+		case pb.MessageType_MsgPropose:
+			r.handlePropose(m)
+		case pb.MessageType_MsgHup:
+		case pb.MessageType_MsgRequestVoteResponse:
+		case pb.MessageType_MsgBeat:
+			r.handleBeat(m)
+		case pb.MessageType_MsgAppendResponse:
+			r.handleAppendResponse(m)
+		case pb.MessageType_MsgHeartbeat:
+			r.handleHeartbeat(m)
+		case pb.MessageType_MsgSnapshot:
+			r.handleSnapshot(m)
+		case pb.MessageType_MsgHeartbeatResponse:
+			r.sendAppend(m.GetFrom())
+		}
+	}
+
 	//log.Printf("%d 's First %d, apply %d, commit %d, stable %d, entries len %d, lastindex %d\n", r.id, r.RaftLog.FirstIndex(),
 	//	r.RaftLog.applied, r.RaftLog.committed, r.RaftLog.stabled, len(r.RaftLog.entries), r.RaftLog.LastIndex())
 	//if r.RaftLog.stabled-r.RaftLog.FirstIndex()+1 > uint64(len(r.RaftLog.entries)) {
@@ -580,7 +630,7 @@ func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 		r.becomeLeader()
 	}
 	if len(r.Prs)-cntFalse <= len(r.Prs)/2 {
-		r.becomeFollower(r.Term, r.Lead)
+		r.becomeFollower(r.Term, None)
 	}
 }
 
@@ -673,10 +723,10 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 	fromTerm := m.GetTerm()
 	if fromTerm > r.Term {
 		r.becomeFollower(fromTerm, m.GetFrom())
-	} else if fromTerm <= r.Term && r.State == StateCandidate {
+	} else if fromTerm == r.Term && r.State == StateCandidate {
 		r.becomeFollower(fromTerm, m.GetFrom())
 	}
-
+	r.Lead = m.GetFrom()
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgHeartbeatResponse,
 		To:      m.GetFrom(),
