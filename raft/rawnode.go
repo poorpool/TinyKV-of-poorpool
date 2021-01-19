@@ -69,6 +69,7 @@ type Ready struct {
 type RawNode struct {
 	Raft *Raft
 	// Your Data Here (2A).
+	lastSoftState SoftState
 	lastHardState pb.HardState // 为了实现 HardState will be equal to empty state if there is no update.
 }
 
@@ -79,6 +80,7 @@ func NewRawNode(config *Config) (*RawNode, error) {
 		Raft: newRaft(config),
 	}
 	rn.lastHardState = rn.GetHardState()
+	rn.lastSoftState = rn.GetSoftState()
 	return rn, nil
 }
 
@@ -152,6 +154,13 @@ func (rn *RawNode) GetHardState() pb.HardState {
 	}
 }
 
+func (rn *RawNode) GetSoftState() SoftState {
+	return SoftState{
+		Lead:      rn.Raft.Lead,
+		RaftState: rn.Raft.State,
+	}
+}
+
 // Ready returns the current point-in-time state of this RawNode.
 func (rn *RawNode) Ready() Ready {
 	// Your Code Here (2A).
@@ -166,6 +175,10 @@ func (rn *RawNode) Ready() Ready {
 	}
 	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
 		rd.Snapshot = *rn.Raft.RaftLog.pendingSnapshot
+	}
+	softState := rn.GetSoftState()
+	if !isSoftStateEqual(rn.lastSoftState, softState) {
+		rd.SoftState = &softState
 	}
 	rn.Raft.msgs = []pb.Message{} // 清空消息
 	rn.Raft.RaftLog.pendingSnapshot = nil
@@ -187,6 +200,9 @@ func (rn *RawNode) HasReady() bool {
 	if !IsEmptyHardState(rn.GetHardState()) && !isHardStateEqual(rn.lastHardState, rn.GetHardState()) {
 		return true
 	}
+	if !isSoftStateEqual(rn.lastSoftState, rn.GetSoftState()) {
+		return true
+	}
 	if !IsEmptySnap(rn.Raft.RaftLog.pendingSnapshot) {
 		return true
 	}
@@ -199,6 +215,9 @@ func (rn *RawNode) Advance(rd Ready) {
 	// Your Code Here (2A).
 	if !IsEmptyHardState(rd.HardState) {
 		rn.lastHardState = rd.HardState
+	}
+	if rd.SoftState != nil {
+		rn.lastSoftState = *rd.SoftState
 	}
 	if len(rd.Entries) > 0 {
 		rn.Raft.RaftLog.stabled = rd.Entries[len(rd.Entries)-1].GetIndex()

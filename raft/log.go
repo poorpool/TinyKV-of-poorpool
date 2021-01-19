@@ -115,9 +115,10 @@ func (l *RaftLog) unstableEntryPointersFromIndex(i uint64) []*pb.Entry {
 	for _, v := range l.entries {
 		if v.GetIndex() >= i {
 			entries = append(entries, &pb.Entry{
-				Term:  v.GetTerm(),
-				Index: v.GetIndex(),
-				Data:  v.GetData(),
+				EntryType: v.GetEntryType(),
+				Term:      v.GetTerm(),
+				Index:     v.GetIndex(),
+				Data:      v.GetData(),
 			})
 		}
 	}
@@ -174,9 +175,10 @@ func (l *RaftLog) Term(i uint64) (uint64, error) {
 func (l *RaftLog) AppendEntriesWithTheirOwnTermAndIndex(entries []*pb.Entry) {
 	for _, v := range entries {
 		l.entries = append(l.entries, pb.Entry{
-			Term:  v.GetTerm(),
-			Index: v.GetIndex(),
-			Data:  v.GetData(),
+			EntryType: v.GetEntryType(),
+			Term:      v.GetTerm(),
+			Index:     v.GetIndex(),
+			Data:      v.GetData(),
 		})
 	}
 }
@@ -184,9 +186,10 @@ func (l *RaftLog) AppendEntriesWithTheirOwnTermAndIndex(entries []*pb.Entry) {
 func (l *RaftLog) AppendEntries(entries []*pb.Entry, term uint64) {
 	for _, v := range entries {
 		l.entries = append(l.entries, pb.Entry{
-			Term:  term,
-			Index: l.LastIndex() + 1,
-			Data:  v.GetData(),
+			EntryType: v.GetEntryType(),
+			Term:      term,
+			Index:     l.LastIndex() + 1,
+			Data:      v.GetData(),
 		})
 	}
 }

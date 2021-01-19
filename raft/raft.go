@@ -180,6 +180,7 @@ func newRaft(c *Config) *Raft {
 		RaftLog:          newLog(c.Storage),
 		Prs:              map[uint64]*Progress{},
 		votes:            map[uint64]bool{},
+		leadTransferee:   None,
 	}
 	term, _ := r.RaftLog.Term(r.RaftLog.LastIndex())
 	if term == 0 {
@@ -321,6 +322,7 @@ func (r *Raft) becomeLeader() {
 	// NOTE: Leader should propose a noop entry on its term
 	r.State = StateLeader
 	r.heartbeatElapsed = 0
+	r.leadTransferee = None
 	r.Lead = r.id
 	for k, _ := range r.Prs {
 		r.Prs[k] = &Progress{
@@ -329,7 +331,7 @@ func (r *Raft) becomeLeader() {
 		}
 	}
 	r.RaftLog.AppendEntriesWithTheirOwnTermAndIndex([]*pb.Entry{
-		{Index: r.RaftLog.LastIndex() + 1, Term: r.Term},
+		{EntryType: pb.EntryType_EntryNormal, Index: r.RaftLog.LastIndex() + 1, Term: r.Term},
 	})
 	if 1 > len(r.Prs)/2 {
 		r.RaftLog.committed = r.RaftLog.LastIndex()
@@ -349,7 +351,10 @@ func (r *Raft) becomeLeader() {
 // on `eraftpb.proto` for what msgs should be handled
 func (r *Raft) Step(m pb.Message) error {
 	// Your Code Here (2A).
-	//log.Print(m.GetMsgType(), ", id ", r.id, ", term", r.T ", state ", r.State, ", from ", m.GetFrom(), ", to", m.GetTo())
+	_, ok := r.Prs[r.id]
+	if !ok {
+		return nil // 自己给 remove 掉了
+	}
 	if m.GetTerm() > r.Term {
 		r.becomeFollower(m.GetTerm(), None) // 这里一定是 None，参见 notes1.md
 	}
@@ -371,6 +376,13 @@ func (r *Raft) Step(m pb.Message) error {
 		case pb.MessageType_MsgSnapshot:
 			r.handleSnapshot(m)
 		case pb.MessageType_MsgHeartbeatResponse:
+		case pb.MessageType_MsgTransferLeader:
+			if r.Lead != None {
+				m.To = r.Lead
+				r.msgs = append(r.msgs, m)
+			}
+		case pb.MessageType_MsgTimeoutNow:
+			r.handleHup(m)
 		}
 	case StateCandidate:
 		switch m.GetMsgType() {
@@ -396,6 +408,9 @@ func (r *Raft) Step(m pb.Message) error {
 		case pb.MessageType_MsgSnapshot:
 			r.handleSnapshot(m)
 		case pb.MessageType_MsgHeartbeatResponse:
+		case pb.MessageType_MsgTransferLeader:
+		case pb.MessageType_MsgTimeoutNow:
+			r.handleHup(m)
 		}
 	case StateLeader:
 		switch m.GetMsgType() {
@@ -417,6 +432,9 @@ func (r *Raft) Step(m pb.Message) error {
 			r.handleSnapshot(m)
 		case pb.MessageType_MsgHeartbeatResponse:
 			r.sendAppend(m.GetFrom())
+		case pb.MessageType_MsgTransferLeader:
+			r.handleTransferLeader(m)
+		case pb.MessageType_MsgTimeoutNow:
 		}
 	}
 
@@ -433,7 +451,7 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 		return
 	}
 	r.Lead = m.GetFrom()
-	if m.Index > r.RaftLog.LastIndex() {
+	if m.GetIndex() > r.RaftLog.LastIndex() {
 		r.sendAppendResponse(m.From, true, r.Term, r.RaftLog.LastIndex())
 		return
 	}
@@ -469,6 +487,9 @@ func (r *Raft) handleAppendEntries(m pb.Message) {
 
 // handlePropose handle Propose RPC request
 func (r *Raft) handlePropose(m pb.Message) {
+	if r.leadTransferee != None {
+		return // 领导转换时不再接收 propose
+	}
 	entries := m.GetEntries()
 	r.RaftLog.AppendEntries(entries, r.Term)
 	for k := range r.Prs {
@@ -583,7 +604,7 @@ func (r *Raft) handleBeat(m pb.Message) {
 
 func (r *Raft) handleAppendResponse(m pb.Message) {
 	r.electionElapsed = 0
-	if m.GetTerm() < r.Term {
+	if m.GetTerm() > 0 && m.GetTerm() < r.Term {
 		return
 	}
 	if m.GetReject() {
@@ -591,31 +612,22 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 		r.sendAppend(m.GetFrom())
 		return
 	}
-	if m.GetIndex() <= r.Prs[m.GetFrom()].Match {
-		return
+	if m.GetIndex() > r.Prs[m.GetFrom()].Match {
+		r.Prs[m.GetFrom()].Next = m.GetIndex() + 1
+		r.Prs[m.GetFrom()].Match = m.GetIndex()
+		r.checkLeaderCommit()
 	}
-	r.Prs[m.GetFrom()].Next = m.GetIndex() + 1
-	r.Prs[m.GetFrom()].Match = m.GetIndex()
-	var changed = false
-	for i := r.RaftLog.committed + 1; i <= r.RaftLog.LastIndex(); i++ {
-		cnt := 0
-		for k, v := range r.Prs {
-			if k != r.id && v.Match >= i {
-				cnt++
-			}
+	if m.GetFrom() == r.leadTransferee {
+		if r.Prs[m.GetFrom()].Match >= r.RaftLog.LastIndex() {
+			r.msgs = append(r.msgs, pb.Message{
+				MsgType: pb.MessageType_MsgTimeoutNow,
+				To:      m.GetFrom(),
+				From:    r.id,
+				Term:    r.Term,
+			})
 		}
-		logTerm, _ := r.RaftLog.Term(i)
-		if logTerm == r.Term && cnt+1 > len(r.Prs)/2 {
-			r.RaftLog.committed = i
-			changed = true
-		}
-	}
-	if changed {
-		for k := range r.Prs {
-			if k != r.id {
-				r.sendAppend(k)
-			}
-		}
+		r.leadTransferee = None                    // fixme: 这句话的位置？
+		r.becomeFollower(r.Term, r.leadTransferee) // fixme: 这里的 term？
 	}
 }
 
@@ -662,12 +674,64 @@ func (r *Raft) handleSnapshot(m pb.Message) {
 	r.sendAppendResponse(m.GetFrom(), false, r.Term, r.RaftLog.LastIndex()) // 考虑一下是 lastindex吗
 }
 
+// 领导收到 appendresponse 或 removenode 后检查 commit 有没有变化，有就广播
+func (r *Raft) checkLeaderCommit() {
+	if r.State != StateLeader {
+		return
+	}
+	changed := false
+	for i := r.RaftLog.committed + 1; i <= r.RaftLog.LastIndex(); i++ {
+		cnt := 0
+		for k, v := range r.Prs {
+			if k != r.id && v.Match >= i {
+				cnt++
+			}
+		}
+		logTerm, _ := r.RaftLog.Term(i)
+		if logTerm == r.Term && cnt+1 > len(r.Prs)/2 {
+			r.RaftLog.committed = i
+			changed = true
+		}
+	}
+	if changed {
+		for k := range r.Prs {
+			if k != r.id {
+				r.sendAppend(k)
+			}
+		}
+	}
+}
+
+// 处理 transferleader 消息
+func (r *Raft) handleTransferLeader(m pb.Message) {
+	_, ok := r.Prs[m.GetFrom()] // 首先要存在
+	if !ok {
+		return
+	}
+	r.leadTransferee = m.GetFrom()
+	r.sendAppend(r.leadTransferee)
+}
+
 // addNode add a new node to raft group
 func (r *Raft) addNode(id uint64) {
 	// Your Code Here (3A).
+	_, isExist := r.Prs[id]
+	if isExist {
+		return
+	}
+	r.Prs[id] = &Progress{ // 虽说只有 leader keep 这些信息，但是都 keep 上也无妨
+		Match: r.RaftLog.LastIndex(),
+		Next:  r.RaftLog.LastIndex() + 1,
+	}
 }
 
 // removeNode remove a node from raft group
 func (r *Raft) removeNode(id uint64) {
 	// Your Code Here (3A).
+	_, isExist := r.Prs[id]
+	if !isExist {
+		return
+	}
+	delete(r.Prs, id)
+	r.checkLeaderCommit()
 }
