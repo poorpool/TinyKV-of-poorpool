@@ -79,6 +79,9 @@ project2c:
 project2c1:
 	$(GOTEST) ./raft ./kv/test_raftstore -run ConcurrentPartition2C
 
+project2c2:
+	$(GOTEST) ./raft ./kv/test_raftstore -run OneSnapshot2C
+
 project3: project3a project3b project3c
 
 project3a:

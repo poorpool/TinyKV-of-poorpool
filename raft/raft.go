@@ -350,7 +350,8 @@ func (r *Raft) Step(m pb.Message) error {
 
 	//log.Printf("%d 's First %d, apply %d, commit %d, stable %d, lastindex %d\n", r.id, r.RaftLog.FirstIndex(),
 	//	r.RaftLog.applied, r.RaftLog.committed, r.RaftLog.stabled, r.RaftLog.LastIndex())
-	//log.Print(m.GetMsgType())
+	//log.Print(m.GetMsgType(), m.GetFrom(), "->", m.GetTo())
+	//log.Print(r.id, "'s state", r.State, ", Term", r.Term)
 	switch m.GetMsgType() { // todo: 在这儿使用反射
 	case pb.MessageType_MsgRequestVote:
 		r.handleRequestVote(m) // todo: 理清 heartbeat 和 append 的关系
@@ -375,12 +376,12 @@ func (r *Raft) Step(m pb.Message) error {
 	}
 	//log.Printf("%d 's First %d, apply %d, commit %d, stable %d, entries len %d, lastindex %d\n", r.id, r.RaftLog.FirstIndex(),
 	//	r.RaftLog.applied, r.RaftLog.committed, r.RaftLog.stabled, len(r.RaftLog.entries), r.RaftLog.LastIndex())
-	if r.RaftLog.stabled-r.RaftLog.FirstIndex()+1 > uint64(len(r.RaftLog.entries)) {
-		panic("poorpool: yuejie")
-	}
-	if r.RaftLog.applied > r.RaftLog.committed {
-		panic("poorpool: applied > committed")
-	}
+	//if r.RaftLog.stabled-r.RaftLog.FirstIndex()+1 > uint64(len(r.RaftLog.entries)) {
+	//	panic("poorpool: yuejie")
+	//}
+	//if r.RaftLog.applied > r.RaftLog.committed {
+	//	panic("poorpool: applied > committed")
+	//}
 	return nil
 }
 
@@ -656,7 +657,7 @@ func (r *Raft) handleAppendResponse(m pb.Message) {
 // handleHeartbeat handle Heartbeat RPC request
 func (r *Raft) handleHeartbeat(m pb.Message) {
 	// Your Code Here (2A).
-	if m.From != r.id { // 不处理自己给自己发消息
+	/*if m.From != r.id { // 不处理自己给自己发消息
 		r.electionElapsed = 0
 		var fromTerm = m.GetTerm()
 		if fromTerm > r.Term {
@@ -664,11 +665,18 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 		} else if fromTerm > 0 && fromTerm < r.Term {
 			return // 过期了
 		}
-	} /*
+	}
 		if m.GetTerm() < r.Term {
 			return
 		}
 		r.becomeFollower(m.GetTerm(), m.GetFrom())*/
+	fromTerm := m.GetTerm()
+	if fromTerm > r.Term {
+		r.becomeFollower(fromTerm, m.GetFrom())
+	} else if fromTerm <= r.Term && r.State == StateCandidate {
+		r.becomeFollower(fromTerm, m.GetFrom())
+	}
+
 	r.msgs = append(r.msgs, pb.Message{
 		MsgType: pb.MessageType_MsgHeartbeatResponse,
 		To:      m.GetFrom(),
