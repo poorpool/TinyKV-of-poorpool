@@ -90,6 +90,12 @@ project3a:
 project3b:
 	$(GOTEST) ./kv/test_raftstore -run 3B
 
+project3b1:
+	$(GOTEST) ./kv/test_raftstore -run ConfChange
+
+project3b2:
+	$(GOTEST) ./kv/test_raftstore -run ConfChangeUnre
+
 project3c:
 	$(GOTEST) ./scheduler/server ./scheduler/server/schedulers -check.f="3C"
 

@@ -343,9 +343,14 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 	// and send RegionTaskApply task to region worker through ps.regionSched, also remember call ps.clearMeta
 	// and ps.clearExtraData to delete stale data
 	// Your Code Here (2C).
+	if ps.isInitialized() {
 
-	ps.clearMeta(kvWB, raftWB)
-	ps.clearExtraData(snapData.GetRegion()) // 先删后设
+		err := ps.clearMeta(kvWB, raftWB)
+		if err != nil {
+			panic("poorpool, clearmeta.")
+		}
+		ps.clearExtraData(snapData.GetRegion()) // 先删后设
+	}
 
 	ps.raftState.LastIndex = snapshot.Metadata.GetIndex()
 	ps.raftState.LastTerm = snapshot.Metadata.GetTerm()
@@ -363,17 +368,17 @@ func (ps *PeerStorage) ApplySnapshot(snapshot *eraftpb.Snapshot, kvWB *engine_ut
 		StartKey: snapData.GetRegion().GetStartKey(),
 		EndKey:   snapData.GetRegion().GetEndKey(),
 	}
-	<-notifier // ?
+	<-notifier
 	prevRegion := ps.region
 
-	ps.SetRegion(snapData.GetRegion())
+	// 因为 ps.region 和 d.ctx.storeMeta 要尽量一起修改，所以放到 d.HandleRaftReady 里头修改 region
 
 	ps.snapState.StateType = snap.SnapState_Applying
-	meta.WriteRegionState(kvWB, ps.region, rspb.PeerState_Normal)
+	meta.WriteRegionState(kvWB, snapData.GetRegion(), rspb.PeerState_Normal)
 
 	return &ApplySnapResult{
 		PrevRegion: prevRegion,
-		Region:     ps.region,
+		Region:     snapData.GetRegion(),
 	}, nil
 }
 
