@@ -105,6 +105,12 @@ project3b4:
 project3b41:
 	$(GOTEST) ./kv/test_raftstore -run OneSplit3B
 
+project3b42:
+	$(GOTEST) ./kv/test_raftstore -run SplitRecoverManyClients3B
+
+project3b43:
+	$(GOTEST) ./kv/test_raftstore -run SplitUnreliable
+
 project3c:
 	$(GOTEST) ./scheduler/server ./scheduler/server/schedulers -check.f="3C"
 

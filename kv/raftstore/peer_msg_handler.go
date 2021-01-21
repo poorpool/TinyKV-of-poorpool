@@ -79,11 +79,13 @@ func (d *peerMsgHandler) applyConfChangeEntry(kvWB *engine_util.WriteBatch, entr
 			}
 		}
 		peer := msg.GetAdminRequest().GetChangePeer().GetPeer()
+		d.ctx.storeMeta.Lock()
+		d.ctx.storeMeta.regionRanges.Delete(&regionItem{region: d.Region()})
 		d.peerStorage.region.RegionEpoch.ConfVer++
 		d.peerStorage.region.Peers = append(d.peerStorage.region.Peers, peer)
 		meta.WriteRegionState(kvWB, d.peerStorage.region, rspb.PeerState_Normal)
-		d.ctx.storeMeta.Lock()
 		d.ctx.storeMeta.regions[d.peerStorage.region.GetId()] = d.peerStorage.region
+		d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
 		d.ctx.storeMeta.Unlock()
 		d.insertPeerCache(peer)
 		if d.RaftGroup.Raft.State == raft.StateLeader {
@@ -93,6 +95,8 @@ func (d *peerMsgHandler) applyConfChangeEntry(kvWB *engine_util.WriteBatch, entr
 		isFound := false
 		for i, v := range d.peerStorage.region.Peers {
 			if v.GetId() == cc.GetNodeId() {
+				d.ctx.storeMeta.Lock()
+				d.ctx.storeMeta.regionRanges.Delete(&regionItem{region: d.Region()})
 				d.peerStorage.region.Peers = append(d.peerStorage.region.Peers[:i], d.peerStorage.region.Peers[i+1:]...)
 				isFound = true
 				break
@@ -101,8 +105,8 @@ func (d *peerMsgHandler) applyConfChangeEntry(kvWB *engine_util.WriteBatch, entr
 		if isFound {
 			d.peerStorage.region.RegionEpoch.ConfVer++
 			meta.WriteRegionState(kvWB, d.peerStorage.region, rspb.PeerState_Normal)
-			d.ctx.storeMeta.Lock()
 			d.ctx.storeMeta.regions[d.peerStorage.region.GetId()] = d.peerStorage.region
+			d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
 			d.ctx.storeMeta.Unlock()
 			d.removePeerCache(cc.GetNodeId())
 			_, ok := d.PeersStartPendingTime[cc.GetNodeId()]
@@ -110,9 +114,10 @@ func (d *peerMsgHandler) applyConfChangeEntry(kvWB *engine_util.WriteBatch, entr
 				delete(d.PeersStartPendingTime, cc.GetNodeId())
 			}
 			if d.Meta.GetId() == cc.GetNodeId() {
-				d.peerStorage.applyState.AppliedIndex = entry.GetIndex()
-				kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
-				kvWB.WriteToDB(d.peerStorage.Engines.Kv)
+				//d.peerStorage.applyState.AppliedIndex = entry.GetIndex()
+				//kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
+				//kvWB.WriteToDB(d.peerStorage.Engines.Kv)
+				kvWB = d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
 				d.destroyPeer() // destroy 前写入
 				return kvWB
 			}
@@ -139,7 +144,7 @@ func (d *peerMsgHandler) applyConfChangeEntry(kvWB *engine_util.WriteBatch, entr
 
 func (d *peerMsgHandler) applyAdminRequest(kvWB *engine_util.WriteBatch, entry pb.Entry, msg raft_cmdpb.RaftCmdRequest) *engine_util.WriteBatch {
 	adminReq := msg.GetAdminRequest()
-	d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
+	//d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
 	switch adminReq.GetCmdType() {
 	case raft_cmdpb.AdminCmdType_CompactLog:
 		compactLog := adminReq.GetCompactLog()
@@ -169,11 +174,11 @@ func (d *peerMsgHandler) applyAdminRequest(kvWB *engine_util.WriteBatch, entry p
 			}
 			return kvWB
 		}
-
-		log.Infof("Oh split! splitKey %s\n", splitKey)
 		region := d.Region()
 		sm := d.ctx.storeMeta
 		sm.Lock()
+
+		sm.regionRanges.Delete(&regionItem{region: region})
 		region.RegionEpoch.Version++
 		peers := []*metapb.Peer{}
 		newPeerIds := splitReq.GetNewPeerIds()
@@ -193,17 +198,21 @@ func (d *peerMsgHandler) applyAdminRequest(kvWB *engine_util.WriteBatch, entry p
 			},
 			Peers: peers,
 		}
-		sm.regions[splitReq.NewRegionId] = newRegion
+
 		region.EndKey = splitKey
+		sm.regions[region.GetId()] = region
+		sm.regions[splitReq.NewRegionId] = newRegion
 		sm.regionRanges.ReplaceOrInsert(&regionItem{region: region})
 		sm.regionRanges.ReplaceOrInsert(&regionItem{region: newRegion})
+		d.peerStorage.region = region // 这两句有用吗
+		d.ctx.storeMeta = sm
 		sm.Unlock()
 		meta.WriteRegionState(kvWB, region, rspb.PeerState_Normal)
 		meta.WriteRegionState(kvWB, newRegion, rspb.PeerState_Normal)
 		d.SizeDiffHint = 0
 		d.ApproximateSize = new(uint64)
 		*d.ApproximateSize = 0
-		peer, _ := createPeer(d.storeID(), d.ctx.cfg, d.ctx.regionTaskSender, d.ctx.engine, newRegion)
+		peer, _ := createPeer(d.storeID(), d.ctx.cfg, d.ctx.schedulerTaskSender, d.ctx.engine, newRegion)
 		d.ctx.router.register(peer)
 		d.ctx.router.send(newRegion.GetId(), message.Msg{
 			Type: message.MsgTypeStart,
@@ -256,7 +265,21 @@ func (d *peerMsgHandler) applyNormalRequest(kvWB *engine_util.WriteBatch, entry 
 		p := d.findAndDeleteProposal(entry.GetIndex())
 		if p != nil {
 			if p.term == entry.GetTerm() {
-				kvWB = d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
+				//kvWB = d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
+				p.cb.Done(ErrResp(err))
+			} else {
+				NotifyStaleReq(entry.GetTerm(), p.cb)
+			}
+		}
+		return kvWB
+	}
+
+	err = util.CheckRegionEpoch(&msg, d.Region(), true)
+	if err != nil {
+		p := d.findAndDeleteProposal(entry.GetIndex())
+		if p != nil {
+			if p.term == entry.GetTerm() {
+				//kvWB = d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
 				p.cb.Done(ErrResp(err))
 			} else {
 				NotifyStaleReq(entry.GetTerm(), p.cb)
@@ -277,7 +300,7 @@ func (d *peerMsgHandler) applyNormalRequest(kvWB *engine_util.WriteBatch, entry 
 	}
 
 	// 立刻写入
-	kvWB = d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
+	//kvWB = d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
 
 	p := d.findAndDeleteProposal(entry.GetIndex())
 	if p != nil {
@@ -286,6 +309,7 @@ func (d *peerMsgHandler) applyNormalRequest(kvWB *engine_util.WriteBatch, entry 
 		}
 		switch req.CmdType {
 		case raft_cmdpb.CmdType_Get:
+			kvWB = d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
 			getRequest := req.GetGet()
 			data, _ := engine_util.GetCF(d.peerStorage.Engines.Kv, getRequest.GetCf(), getRequest.GetKey())
 			resp := newCmdResp()
@@ -306,6 +330,7 @@ func (d *peerMsgHandler) applyNormalRequest(kvWB *engine_util.WriteBatch, entry 
 			}
 			p.cb.Done(resp)
 		case raft_cmdpb.CmdType_Snap:
+			kvWB = d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
 			if err = util.CheckRegionEpoch(&msg, d.Region(), true); err != nil {
 				p.cb.Done(ErrResp(err))
 				return kvWB
@@ -357,6 +382,9 @@ func (d *peerMsgHandler) HandleRaftReady() {
 			d.peerStorage.region = applySnapshotResult.Region
 			d.ctx.storeMeta.Lock() // 要加锁，不然会冲突
 			d.ctx.storeMeta.regions[applySnapshotResult.Region.GetId()] = applySnapshotResult.Region
+			d.ctx.storeMeta.regionRanges.Delete(&regionItem{
+				region: applySnapshotResult.PrevRegion,
+			})
 			d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{
 				region: applySnapshotResult.Region,
 			})
@@ -374,12 +402,9 @@ func (d *peerMsgHandler) HandleRaftReady() {
 				return // 可能被 destroy 了
 			}
 		}
-		d.peerStorage.applyState.AppliedIndex = rd.CommittedEntries[len(rd.CommittedEntries)-1].GetIndex()
-		kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
-		kvWB.WriteToDB(d.peerStorage.Engines.Kv)
+		kvWB = d.writeKvWBandSaveApplyStateFromEntry(kvWB, rd.CommittedEntries[len(rd.CommittedEntries)-1])
 	}
 	d.RaftGroup.Advance(rd)
-	//log.Info(d.PeerId(), "'s regionid", d.regionId, ", conf", d.Region().RegionEpoch.ConfVer)
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -478,6 +503,7 @@ func (d *peerMsgHandler) proposeAdminRequest(msg *raft_cmdpb.RaftCmdRequest, cb 
 			Context:    data,
 		})
 	case raft_cmdpb.AdminCmdType_Split:
+		log.Info("get split request")
 		splitReq := adminReq.GetSplit()
 		err := util.CheckKeyInRegion(splitReq.GetSplitKey(), d.Region())
 		if err != nil {
