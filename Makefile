@@ -95,6 +95,15 @@ project3b1:
 
 project3b2:
 	$(GOTEST) ./kv/test_raftstore -run ConfChangeUnre
+	
+project3b3:
+	$(GOTEST) ./kv/test_raftstore -run ConfChangeSnapshotUnreliableRecoverConcurrentPartition
+
+project3b4:
+	$(GOTEST) ./kv/test_raftstore -run Split
+
+project3b41:
+	$(GOTEST) ./kv/test_raftstore -run OneSplit3B
 
 project3c:
 	$(GOTEST) ./scheduler/server ./scheduler/server/schedulers -check.f="3C"

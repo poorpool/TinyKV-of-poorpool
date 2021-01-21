@@ -186,6 +186,9 @@ func newRaft(c *Config) *Raft {
 		leadTransferee:   None,
 	}
 	r.Term = hardState.GetTerm()
+	if r.Term == 0 {
+		r.Term, _ = r.RaftLog.Term(r.RaftLog.LastIndex())
+	}
 	r.electionRandomTimeout = rand.Intn(r.electionTimeout) + r.electionTimeout
 	if c.peers == nil {
 		c.peers = confState.Nodes
