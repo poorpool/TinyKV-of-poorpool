@@ -61,6 +61,9 @@ func (txn *MvccTxn) GetLock(key []byte) (*Lock, error) {
 	if err != nil {
 		return nil, err
 	}
+	if result == nil || len(result) == 0 {
+		return nil, nil
+	}
 	return ParseLock(result)
 }
 
