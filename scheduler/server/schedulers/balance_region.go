@@ -18,6 +18,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule/operator"
 	"github.com/pingcap-incubator/tinykv/scheduler/server/schedule/opt"
+	"sort"
 )
 
 func init() {
@@ -75,8 +76,85 @@ func (s *balanceRegionScheduler) IsScheduleAllowed(cluster opt.Cluster) bool {
 	return s.opController.OperatorCount(operator.OpRegion) < cluster.GetRegionScheduleLimit()
 }
 
+type storeSlice []*core.StoreInfo
+
+func (s storeSlice) Len() int {
+	return len(s)
+}
+
+func (s storeSlice) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
+}
+
+func (s storeSlice) Less(i, j int) bool {
+	return s[i].GetRegionSize() > s[j].GetRegionSize()
+}
+
 func (s *balanceRegionScheduler) Schedule(cluster opt.Cluster) *operator.Operator {
 	// Your Code Here (3C).
-
-	return nil
+	maxDownTime := cluster.GetMaxStoreDownTime()
+	var stores storeSlice
+	for _, v := range cluster.GetStores() {
+		if v.IsUp() && v.DownTime() <= maxDownTime {
+			stores = append(stores, v)
+		}
+	}
+	if len(stores) == 0 {
+		return nil
+	}
+	sort.Sort(stores) // 按照 regionSize 降序排序
+	var region *core.RegionInfo
+	var fromStore, toStore *core.StoreInfo
+	i := 0
+	for i, v := range stores {
+		cluster.GetPendingRegionsWithLock(v.GetID(), func(rc core.RegionsContainer) {
+			region = rc.RandomRegion(nil, nil)
+		})
+		if region != nil {
+			fromStore = stores[i]
+			break
+		}
+		cluster.GetFollowersWithLock(v.GetID(), func(rc core.RegionsContainer) {
+			region = rc.RandomRegion(nil, nil)
+		})
+		if region != nil {
+			fromStore = stores[i]
+			break
+		}
+		cluster.GetLeadersWithLock(v.GetID(), func(rc core.RegionsContainer) {
+			region = rc.RandomRegion(nil, nil)
+		})
+		if region != nil {
+			fromStore = stores[i]
+			break
+		}
+	}
+	if region == nil || fromStore == nil {
+		return nil
+	}
+	regionStoreIds := region.GetStoreIds()
+	if len(regionStoreIds) < cluster.GetMaxReplicas() { // 不到必要的时候不去新 store
+		return nil
+	}
+	for j := len(stores) - 1; j > i; j-- {
+		if _, ok := regionStoreIds[stores[j].GetID()]; !ok { // toStore 不能在 region 已有的里面
+			toStore = stores[j]
+			break
+		}
+	}
+	if toStore == nil {
+		return nil
+	}
+	if fromStore.GetRegionSize()-toStore.GetRegionSize() <= 2*region.GetApproximateSize() {
+		return nil
+	}
+	peer, err := cluster.AllocPeer(toStore.GetID())
+	if err != nil {
+		return nil
+	}
+	oper, err := operator.CreateMovePeerOperator("", cluster, region, operator.OpBalance, fromStore.GetID(), toStore.GetID(), peer.GetId())
+	if err != nil {
+		return nil
+	}
+	return oper
 }
