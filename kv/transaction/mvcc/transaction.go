@@ -159,18 +159,9 @@ func (txn *MvccTxn) DeleteValue(key []byte) {
 
 // CurrentWrite searches for a write with this transaction's start timestamp. It returns a Write from the DB and that
 // write's commit timestamp, or an error.
+// write 的 ts 是 txn.StartTS，返回的 ts 是 write commit 的 ts
 func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 	// Your Code Here (4A).
-	iter := txn.Reader.IterCF(engine_util.CfDefault)
-	defer iter.Close()
-	iter.Seek(EncodeKey(key, txn.StartTS))
-	if !iter.Valid() {
-		return nil, 0, nil
-	}
-	if txn.StartTS != decodeTimestamp(iter.Item().Key()) {
-		return nil, 0, nil
-	}
-
 	iterWrite := txn.Reader.IterCF(engine_util.CfWrite)
 	defer iterWrite.Close()
 	var rWrite *Write
@@ -184,13 +175,14 @@ func (txn *MvccTxn) CurrentWrite(key []byte) (*Write, uint64, error) {
 			continue
 		}
 		write, err := ParseWrite(value)
-		if decodeTimestamp(iterWrite.Item().Key()) <= txn.StartTS {
-			break
+		if write == nil || err != nil {
+			continue
 		}
-		if err != nil {
+		if write.StartTS != txn.StartTS {
 			continue
 		}
 		rWrite, rTimeStamp = write, decodeTimestamp(iterWrite.Item().Key())
+		break
 	}
 	return rWrite, rTimeStamp, nil
 }
