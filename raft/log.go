@@ -77,7 +77,7 @@ func newLog(storage Storage) *RaftLog {
 		storage:    storage,
 		firstIndex: fi,
 		applied:    fi - 1,
-		committed:  fi - 1, // fixme: 是吗？
+		committed:  fi - 1,
 		stabled:    ls,
 	}
 	return l

@@ -68,7 +68,11 @@ func (d *peerMsgHandler) applyConfChangeEntry(kvWB *engine_util.WriteBatch, entr
 	if err != nil {
 		p := d.findAndDeleteProposal(entry.GetIndex())
 		if p != nil {
-			p.cb.Done(ErrResp(err))
+			if p.term == entry.GetTerm() {
+				p.cb.Done(ErrResp(err))
+			} else {
+				NotifyStaleReq(entry.GetTerm(), p.cb)
+			}
 		}
 		return kvWB
 	}
@@ -114,9 +118,6 @@ func (d *peerMsgHandler) applyConfChangeEntry(kvWB *engine_util.WriteBatch, entr
 				delete(d.PeersStartPendingTime, cc.GetNodeId())
 			}
 			if d.Meta.GetId() == cc.GetNodeId() {
-				//d.peerStorage.applyState.AppliedIndex = entry.GetIndex()
-				//kvWB.SetMeta(meta.ApplyStateKey(d.regionId), d.peerStorage.applyState)
-				//kvWB.WriteToDB(d.peerStorage.Engines.Kv)
 				kvWB = d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
 				d.destroyPeer() // destroy 前写入
 				return kvWB
@@ -130,21 +131,24 @@ func (d *peerMsgHandler) applyConfChangeEntry(kvWB *engine_util.WriteBatch, entr
 	})
 	p := d.findAndDeleteProposal(entry.GetIndex())
 	if p != nil {
-		resp := newCmdResp()
-		resp.AdminResponse = &raft_cmdpb.AdminResponse{
-			CmdType: raft_cmdpb.AdminCmdType_ChangePeer,
-			ChangePeer: &raft_cmdpb.ChangePeerResponse{
-				Region: d.peerStorage.region,
-			},
+		if p.term == entry.GetTerm() {
+			resp := newCmdResp()
+			resp.AdminResponse = &raft_cmdpb.AdminResponse{
+				CmdType: raft_cmdpb.AdminCmdType_ChangePeer,
+				ChangePeer: &raft_cmdpb.ChangePeerResponse{
+					Region: d.peerStorage.region,
+				},
+			}
+			p.cb.Done(resp)
+		} else {
+			NotifyStaleReq(entry.GetTerm(), p.cb)
 		}
-		p.cb.Done(resp)
 	}
 	return kvWB
 }
 
 func (d *peerMsgHandler) applyAdminRequest(kvWB *engine_util.WriteBatch, entry pb.Entry, msg raft_cmdpb.RaftCmdRequest) *engine_util.WriteBatch {
 	adminReq := msg.GetAdminRequest()
-	//d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
 	switch adminReq.GetCmdType() {
 	case raft_cmdpb.AdminCmdType_CompactLog:
 		compactLog := adminReq.GetCompactLog()
@@ -163,14 +167,22 @@ func (d *peerMsgHandler) applyAdminRequest(kvWB *engine_util.WriteBatch, entry p
 		if err != nil {
 			p := d.findAndDeleteProposal(entry.GetIndex())
 			if p != nil {
-				p.cb.Done(ErrResp(err))
+				if p.term == entry.GetTerm() {
+					p.cb.Done(ErrResp(err))
+				} else {
+					NotifyStaleReq(entry.GetTerm(), p.cb)
+				}
 			}
 			return kvWB
 		}
 		if err = util.CheckRegionEpoch(&msg, d.Region(), true); err != nil {
 			p := d.findAndDeleteProposal(entry.GetIndex())
 			if p != nil {
-				p.cb.Done(ErrResp(err))
+				if p.term == entry.GetTerm() {
+					p.cb.Done(ErrResp(err))
+				} else {
+					NotifyStaleReq(entry.GetTerm(), p.cb)
+				}
 			}
 			return kvWB
 		}
@@ -219,14 +231,18 @@ func (d *peerMsgHandler) applyAdminRequest(kvWB *engine_util.WriteBatch, entry p
 		})
 		p := d.findAndDeleteProposal(entry.GetIndex())
 		if p != nil {
-			resp := newCmdResp()
-			resp.AdminResponse = &raft_cmdpb.AdminResponse{
-				CmdType: raft_cmdpb.AdminCmdType_Split,
-				Split: &raft_cmdpb.SplitResponse{
-					Regions: []*metapb.Region{region, newRegion},
-				},
+			if p.term == entry.GetTerm() {
+				resp := newCmdResp()
+				resp.AdminResponse = &raft_cmdpb.AdminResponse{
+					CmdType: raft_cmdpb.AdminCmdType_Split,
+					Split: &raft_cmdpb.SplitResponse{
+						Regions: []*metapb.Region{region, newRegion},
+					},
+				}
+				p.cb.Done(resp)
+			} else {
+				NotifyStaleReq(entry.GetTerm(), p.cb)
 			}
-			p.cb.Done(resp)
 		}
 		if d.IsLeader() {
 			d.HeartbeatScheduler(d.ctx.schedulerTaskSender)
@@ -265,7 +281,6 @@ func (d *peerMsgHandler) applyNormalRequest(kvWB *engine_util.WriteBatch, entry 
 		p := d.findAndDeleteProposal(entry.GetIndex())
 		if p != nil {
 			if p.term == entry.GetTerm() {
-				//kvWB = d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
 				p.cb.Done(ErrResp(err))
 			} else {
 				NotifyStaleReq(entry.GetTerm(), p.cb)
@@ -273,20 +288,6 @@ func (d *peerMsgHandler) applyNormalRequest(kvWB *engine_util.WriteBatch, entry 
 		}
 		return kvWB
 	}
-	/*
-		err = util.CheckRegionEpoch(&msg, d.Region(), true)
-		if err != nil {
-			p := d.findAndDeleteProposal(entry.GetIndex())
-			if p != nil {
-				if p.term == entry.GetTerm() {
-					//kvWB = d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
-					p.cb.Done(ErrResp(err))
-				} else {
-					NotifyStaleReq(entry.GetTerm(), p.cb)
-				}
-			}
-			return kvWB
-		}*/
 
 	switch req.GetCmdType() {
 	case raft_cmdpb.CmdType_Get:
@@ -298,9 +299,6 @@ func (d *peerMsgHandler) applyNormalRequest(kvWB *engine_util.WriteBatch, entry 
 		kvWB.DeleteCF(deleteRequest.GetCf(), deleteRequest.GetKey())
 	case raft_cmdpb.CmdType_Snap:
 	}
-
-	// 立刻写入
-	//kvWB = d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
 
 	p := d.findAndDeleteProposal(entry.GetIndex())
 	if p != nil {
@@ -504,7 +502,6 @@ func (d *peerMsgHandler) proposeAdminRequest(msg *raft_cmdpb.RaftCmdRequest, cb 
 			Context:    data,
 		})
 	case raft_cmdpb.AdminCmdType_Split:
-		log.Info("get split request")
 		splitReq := adminReq.GetSplit()
 		err := util.CheckKeyInRegion(splitReq.GetSplitKey(), d.Region())
 		if err != nil {

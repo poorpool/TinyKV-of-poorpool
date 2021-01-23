@@ -55,7 +55,7 @@ func (server *Server) RawPut(_ context.Context, req *kvrpcpb.RawPutRequest) (*kv
 	// Your Code Here (1).
 	err := server.storage.Write(nil, []storage.Modify{
 		{
-			storage.Put{
+			Data: storage.Put{
 				Key:   req.Key,
 				Value: req.Value,
 				Cf:    req.Cf,
@@ -81,8 +81,8 @@ func (server *Server) RawDelete(_ context.Context, req *kvrpcpb.RawDeleteRequest
 		return nil, nil
 	}
 	err = server.storage.Write(nil, []storage.Modify{
-		{
-			storage.Delete{
+		{ // 为了过 ci
+			Data: storage.Delete{
 				Key: req.Key,
 				Cf:  req.Cf,
 			},
