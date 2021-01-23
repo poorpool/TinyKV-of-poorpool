@@ -461,17 +461,21 @@ func (r *Raft) Step(m pb.Message) error {
 		case pb.MessageType_MsgTimeoutNow:
 		}
 	}
-
+	/*if len(r.RaftLog.entries) > 0 && r.RaftLog.stabled < r.RaftLog.firstIndex {
+		log.Printf("stable %d, first %d\n", r.RaftLog.stabled, r.RaftLog.firstIndex)
+		panic("poorpool: dismatch")
+	}*/
 	return nil
 }
 
 // handleAppendEntries handle AppendEntries RPC request
 func (r *Raft) handleAppendEntries(m pb.Message) {
 	// Your Code Here (2A).
+	//log.Printf("%d received append from %d, fromTerm %d, its Term %d", r.id, m.GetFrom(), m.GetTerm(), r.Term)
+	//log.Printf("\ncommit %d, len %d, oricommit %d, FIRSTINDEX%d\n", m.GetCommit(), len(m.GetEntries()), r.RaftLog.committed, r.RaftLog.FirstIndex())
 	reject := false
 	r.electionElapsed = 0
-	// fixme: 所有这种语法都应该先加一个 m.GetTerm() > 0
-	if m.GetTerm() < r.Term {
+	if m.GetTerm() > 0 && m.GetTerm() < r.Term {
 		r.sendAppendResponse(m.GetFrom(), true, r.Term, 0) // 只是为了让这个 leader 下台，index 填 0
 		return
 	}
@@ -566,7 +570,7 @@ func (r *Raft) handleHup(m pb.Message) {
 // handleRequestVote handle RequestVote RPC request
 func (r *Raft) handleRequestVote(m pb.Message) {
 	r.electionElapsed = 0 // fixme: 这个时间合适吗
-	if m.GetTerm() < r.Term {
+	if m.GetTerm() > 0 && m.GetTerm() < r.Term {
 		r.msgs = append(r.msgs, pb.Message{ // 不直接 return，让发起者早点失败
 			MsgType: pb.MessageType_MsgRequestVoteResponse,
 			To:      m.GetFrom(),
@@ -599,7 +603,7 @@ func (r *Raft) handleRequestVote(m pb.Message) {
 // handleRequestVoteResponse handle RequestVoteResponse RPC request
 func (r *Raft) handleRequestVoteResponse(m pb.Message) {
 	r.electionElapsed = 0
-	if m.GetTerm() < r.Term {
+	if m.GetTerm() > 0 && m.GetTerm() < r.Term {
 		return
 	}
 	r.votes[m.GetFrom()] = !m.GetReject()
@@ -676,6 +680,7 @@ func (r *Raft) handleHeartbeat(m pb.Message) {
 // handleSnapshot handle Snapshot RPC request
 func (r *Raft) handleSnapshot(m pb.Message) {
 	// Your Code Here (2C).
+	//log.Printf("%d received snapshot from %d, fromTerm %d, myTerm %d\n", r.id, m.GetFrom(), m.GetTerm(), r.Term)
 	r.electionElapsed = 0
 	snap := m.GetSnapshot()
 	if m.GetTerm() < r.Term && snap.Metadata.GetIndex() <= r.RaftLog.committed {

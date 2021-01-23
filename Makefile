@@ -73,6 +73,12 @@ project2b:
 project2b1:
 	$(GOTEST) ./kv/test_raftstore -run PersistConcurrent
 
+project2b2:
+	$(GOTEST) ./kv/test_raftstore -run OnePartition2B
+
+project2b3:
+	$(GOTEST) ./kv/test_raftstore -run PersistPartitionUnreliable2B
+
 project2c:
 	$(GOTEST) ./raft ./kv/test_raftstore -run 2C
 
@@ -81,6 +87,9 @@ project2c1:
 
 project2c2:
 	$(GOTEST) ./raft ./kv/test_raftstore -run OneSnapshot2C
+
+project2c3:
+	$(GOTEST) ./raft ./kv/test_raftstore -run SnapshotUnreliable
 
 project3: project3a project3b project3c
 

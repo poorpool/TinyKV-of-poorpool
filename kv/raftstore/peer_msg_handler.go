@@ -273,20 +273,20 @@ func (d *peerMsgHandler) applyNormalRequest(kvWB *engine_util.WriteBatch, entry 
 		}
 		return kvWB
 	}
-
-	err = util.CheckRegionEpoch(&msg, d.Region(), true)
-	if err != nil {
-		p := d.findAndDeleteProposal(entry.GetIndex())
-		if p != nil {
-			if p.term == entry.GetTerm() {
-				//kvWB = d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
-				p.cb.Done(ErrResp(err))
-			} else {
-				NotifyStaleReq(entry.GetTerm(), p.cb)
+	/*
+		err = util.CheckRegionEpoch(&msg, d.Region(), true)
+		if err != nil {
+			p := d.findAndDeleteProposal(entry.GetIndex())
+			if p != nil {
+				if p.term == entry.GetTerm() {
+					//kvWB = d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
+					p.cb.Done(ErrResp(err))
+				} else {
+					NotifyStaleReq(entry.GetTerm(), p.cb)
+				}
 			}
-		}
-		return kvWB
-	}
+			return kvWB
+		}*/
 
 	switch req.GetCmdType() {
 	case raft_cmdpb.CmdType_Get:
@@ -306,6 +306,7 @@ func (d *peerMsgHandler) applyNormalRequest(kvWB *engine_util.WriteBatch, entry 
 	if p != nil {
 		if p.term != entry.GetTerm() {
 			NotifyStaleReq(entry.GetTerm(), p.cb)
+			return kvWB // !!!!!!!!!!!
 		}
 		switch req.CmdType {
 		case raft_cmdpb.CmdType_Get:
@@ -330,7 +331,7 @@ func (d *peerMsgHandler) applyNormalRequest(kvWB *engine_util.WriteBatch, entry 
 			}
 			p.cb.Done(resp)
 		case raft_cmdpb.CmdType_Snap:
-			kvWB = d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
+			//kvWB = d.writeKvWBandSaveApplyStateFromEntry(kvWB, entry)
 			if err = util.CheckRegionEpoch(&msg, d.Region(), true); err != nil {
 				p.cb.Done(ErrResp(err))
 				return kvWB
